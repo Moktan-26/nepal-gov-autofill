@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    https://github.com/Moktan-26/nepal-gov-autofill
-// @version      7.3
-// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, opens Apply for a document after sign-in, printable slip. Captcha + Register stay manual.
+// @version      8.0
+// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, opens Apply for a document after sign-in, picks New + 34 pages + Kathmandu office, printable slip. Captcha + Register stay manual.
 // @match        https://online.nepalpassport.gov.np/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -20,6 +20,12 @@
   // ---------- CONFIG ----------
   const CONFIG = {
     fallbackEmail: '',          // optional fallback email if the person has none (e.g. a family member's)
+    // Application defaults (change here if needed)
+    appType: /first issuance/i,              // First issuance (New)
+    passportType: /ordinary 34 pages/i,      // Ordinary 34 pages
+    province: /^bagmati/i,
+    district: /^kathmandu/i,
+    office: /^department of passports/i,
     smsEndpoint: '',            // your SMS backend URL: POST {phone, message}. Empty = no SMS, just print slip
     scanServer: 'https://nepal-gov-autofill.tamang-subash36.workers.dev/scan',  // reads the NID card (holds the AI key)
   };
@@ -371,6 +377,7 @@
     if (path === currentPath) return;
     const prev = currentPath; currentPath = path;
     if (loginBox) { loginBox.remove(); loginBox = null; }
+    if (!path.startsWith('/application/')) clearToast();
     if (regBox) regBox.style.display = path.startsWith('/account/register') ? 'block' : 'none';
     // left the login page after we filled it -> logged in (or gave up): forget the password
     if (prev.startsWith('/account/login') && !path.startsWith('/account/login') && filledLogin) {
@@ -379,6 +386,89 @@
     if (path.startsWith('/account/register') && !regBox) waitFor('#entityName').then(el => el && !regBox && buildRegister());
     if (path.startsWith('/account/login')) { GM_setValue('loginSeenAt', Date.now()); fillLogin(); }
     if (path === '/' || path === '/home') openApplyAfterLogin();
+    if (path.startsWith('/application/pre-enrollment-home')) chooseTypeAndPages();
+    if (path.startsWith('/application/integrated-enrollment')) chooseLocation();
+  }
+
+  // ---------- APPLICATION: small helpers for the site's buttons and dropdowns ----------
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const byText = (sel, re) => [...document.querySelectorAll(sel)].find(e => re.test(e.innerText.replace(/\s+/g, ' ').trim()));
+  async function waitText(sel, re, ms = 10000) {
+    for (const t0 = Date.now(); Date.now() - t0 < ms; await sleep(250)) { const e = byText(sel, re); if (e) return e; }
+    return null;
+  }
+  let toastEl = null;
+  function toast(html, color = '#e6f4ea') {
+    if (!toastEl) {
+      toastEl = document.createElement('div');
+      toastEl.style.cssText = 'position:fixed;top:70px;right:16px;z-index:99999;background:#fff;border:3px solid #c8102e;border-radius:12px;padding:14px;width:300px;font:15px sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.25)';
+      document.body.appendChild(toastEl);
+    }
+    toastEl.innerHTML = '<b style="color:#c8102e">🪪 Nepal Gov Autofill</b><div style="margin-top:8px;padding:10px;border-radius:8px;font-weight:bold;background:' + color + '">' + html + '</div>';
+  }
+  const clearToast = () => { if (toastEl) { toastEl.remove(); toastEl = null; } };
+
+  // PrimeNG dropdown: open it, click the option matching re, wait for the page to load the next list
+  async function pickDropdown(id, re) {
+    const dd = await waitFor('#' + id);
+    if (!dd) return false;
+    const current = dd.querySelector('.p-dropdown-label')?.innerText.trim() || '';
+    if (re.test(current)) return true;                       // already chosen
+    for (let tries = 0; tries < 20; tries++) {               // options load from the server; retry until they appear
+      (dd.querySelector('.p-dropdown-trigger') || dd).click();
+      await sleep(600);
+      const opt = [...document.querySelectorAll('.p-dropdown-panel li[role=option], .p-dropdown-items li')].find(li => re.test(li.innerText.trim()));
+      if (opt) { opt.click(); await sleep(800); return true; }
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await sleep(500);
+    }
+    return false;
+  }
+
+  // Page 1: application type -> First issuance, then Ordinary 34 pages, then Next
+  let typeDone = false;
+  async function chooseTypeAndPages() {
+    if (typeDone) return;
+    const page = () => location.pathname.toLowerCase().startsWith('/application/pre-enrollment-home');
+    if (!/current application type/i.test(document.body.innerText)) {
+      // the type choices are clickable cards (div role=button), not real <button>s
+      const label = await waitText('.usecase-text', CONFIG.appType);
+      if (!label || !page()) return;
+      (label.closest('[role=button],button,a,[tabindex]') || label).click();
+    }
+    const radio = await waitFor('input[name="ordinaryType"]');
+    if (!radio || !page()) return;
+    const row = [...document.querySelectorAll('input[name="ordinaryType"]')]
+      .find(r => CONFIG.passportType.test((r.closest('label') || r.parentElement.parentElement).innerText));
+    if (!row) return;
+    const box = row.closest('.p-radiobutton')?.querySelector('.p-radiobutton-box') || row;
+    if (!row.checked) box.click();
+    await sleep(500);
+    typeDone = true;
+    toast('✔ First issuance (New) · Ordinary 34 pages<br>Opening the application… / आवेदन खोल्दै…');
+    say('नयाँ राहदानी, चौंतीस पाना छानियो।');
+    const next = await waitText('button', /^next$/i);
+    if (next && page()) next.click();
+  }
+
+  // Page 2: appointment location -> Bagmati / Kathmandu / Department of Passports, then the user picks a time
+  let locDone = false;
+  async function chooseLocation() {
+    if (locDone) return;
+    const ok = await pickDropdown('amsProvince', CONFIG.province)
+      && await pickDropdown('amsDistrict', CONFIG.district)
+      && await pickDropdown('amsProvider', CONFIG.office);
+    if (!location.pathname.toLowerCase().startsWith('/application/integrated-enrollment')) return;
+    locDone = true;
+    if (!ok) { toast('⚠ Could not set the location. Please choose Province, District and Location yourself. / स्थान आफैं छान्नुहोस्', '#ffe5e5'); return; }
+    // move on to the Time step by itself (only navigation — no booking happens here)
+    for (let i = 0; i < 20; i++) {
+      const next = byText('button', /^next/i);
+      if (next && !next.disabled && !next.classList.contains('p-disabled')) { next.click(); break; }
+      await sleep(300);
+    }
+    toast('✔ Kathmandu · Department of Passports<br>👉 Choose a date and time for your appointment / अपोइन्टमेन्टको मिति र समय छान्नुहोस्');
+    say('काठमाडौं, राहदानी विभाग छानियो। अब अपोइन्टमेन्टको मिति र समय छान्नुहोस्।');
   }
 
   // ---------- AFTER SIGN-IN: go straight to "Apply for a document" ----------
