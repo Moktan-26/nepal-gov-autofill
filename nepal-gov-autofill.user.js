@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    https://github.com/Moktan-26/nepal-gov-autofill
-// @version      8.0
+// @version      8.1
 // @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, opens Apply for a document after sign-in, picks New + 34 pages + Kathmandu office, printable slip. Captcha + Register stay manual.
 // @match        https://online.nepalpassport.gov.np/*
 // @grant        GM_xmlhttpRequest
@@ -392,7 +392,8 @@
 
   // ---------- APPLICATION: small helpers for the site's buttons and dropdowns ----------
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const byText = (sel, re) => [...document.querySelectorAll(sel)].find(e => re.test(e.innerText.replace(/\s+/g, ' ').trim()));
+  const txt = e => (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim();
+  const byText = (sel, re) => [...document.querySelectorAll(sel)].find(e => re.test(txt(e)));
   async function waitText(sel, re, ms = 10000) {
     for (const t0 = Date.now(); Date.now() - t0 < ms; await sleep(250)) { const e = byText(sel, re); if (e) return e; }
     return null;
@@ -425,12 +426,36 @@
     return false;
   }
 
+  // Data privacy consent popup: the applicant must agree themselves. We explain it aloud,
+  // make "I agree" obvious, and wait — we never click it for them.
+  const visible = e => !!(e && (e.offsetWidth || e.offsetHeight || e.getClientRects().length));
+  const consentDialog = () => [...document.querySelectorAll('.p-dialog,[role=dialog]')]
+    .find(d => visible(d) && /privacy consent|गोपनीयता/i.test(txt(d)));
+  async function waitForConsent(page) {
+    await sleep(1500);                                    // the popup appears a moment after the page
+    let d = consentDialog();
+    if (!d) return true;
+    const agree = [...d.querySelectorAll('button')].find(b => /i agree|सहमत/i.test(txt(b)));
+    if (agree) {
+      agree.style.cssText += ';background:#1a7f37 !important;color:#fff !important;font-size:20px !important;padding:16px 28px !important;border:4px solid #0b4d1f !important';
+      agree.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.08)' }, { transform: 'scale(1)' }], { duration: 1000, iterations: Infinity });
+    }
+    toast('👉 Data privacy consent: this asks your permission to use your details for the passport.<br>If you agree, press the green <u>I agree</u> button.<br><br>तपाईंको विवरण राहदानीका लागि प्रयोग गर्न अनुमति माग्दैछ। सहमत भए हरियो बटन थिच्नुहोस्।', '#fff4e5');
+    say('यसले तपाईंको विवरण राहदानीका लागि प्रयोग गर्न अनुमति माग्दैछ। सहमत हुनुहुन्छ भने हरियो आई एग्री बटन थिच्नुहोस्।');
+    for (const t0 = Date.now(); Date.now() - t0 < 15 * 60 * 1000; await sleep(400)) {
+      if (!page()) return false;                          // refused / left the page
+      if (!consentDialog()) return true;                  // agreed -> popup closed
+    }
+    return false;
+  }
+
   // Page 1: application type -> First issuance, then Ordinary 34 pages, then Next
   let typeDone = false;
   async function chooseTypeAndPages() {
     if (typeDone) return;
     const page = () => location.pathname.toLowerCase().startsWith('/application/pre-enrollment-home');
-    if (!/current application type/i.test(document.body.innerText)) {
+    if (!await waitForConsent(page)) return;
+    if (!/current application type/i.test(txt(document.body))) {
       // the type choices are clickable cards (div role=button), not real <button>s
       const label = await waitText('.usecase-text', CONFIG.appType);
       if (!label || !page()) return;
@@ -439,7 +464,7 @@
     const radio = await waitFor('input[name="ordinaryType"]');
     if (!radio || !page()) return;
     const row = [...document.querySelectorAll('input[name="ordinaryType"]')]
-      .find(r => CONFIG.passportType.test((r.closest('label') || r.parentElement.parentElement).innerText));
+      .find(r => CONFIG.passportType.test(txt(r.closest('label') || r.parentElement.parentElement)));
     if (!row) return;
     const box = row.closest('.p-radiobutton')?.querySelector('.p-radiobutton-box') || row;
     if (!row.checked) box.click();
@@ -449,6 +474,7 @@
     say('नयाँ राहदानी, चौंतीस पाना छानियो।');
     const next = await waitText('button', /^next$/i);
     if (next && page()) next.click();
+    await waitForConsent(page);                           // the consent popup opens after Next
   }
 
   // Page 2: appointment location -> Bagmati / Kathmandu / Department of Passports, then the user picks a time
