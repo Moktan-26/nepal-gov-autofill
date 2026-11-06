@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    https://github.com/Moktan-26/nepal-gov-autofill
-// @version      7.2
-// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, printable slip. Captcha + Register stay manual.
+// @version      7.3
+// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, opens Apply for a document after sign-in, printable slip. Captcha + Register stay manual.
 // @match        https://online.nepalpassport.gov.np/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -377,7 +377,25 @@
       GM_deleteValue('pendingLogin'); filledLogin = false;
     }
     if (path.startsWith('/account/register') && !regBox) waitFor('#entityName').then(el => el && !regBox && buildRegister());
-    if (path.startsWith('/account/login')) fillLogin();
+    if (path.startsWith('/account/login')) { GM_setValue('loginSeenAt', Date.now()); fillLogin(); }
+    if (path === '/' || path === '/home') openApplyAfterLogin();
+  }
+
+  // ---------- AFTER SIGN-IN: go straight to "Apply for a document" ----------
+  // Only right after the login page (within 2 minutes), so normal visits to Home are left alone.
+  async function openApplyAfterLogin() {
+    const seen = GM_getValue('loginSeenAt', 0);
+    if (!seen || Date.now() - seen > 2 * 60 * 1000) return;
+    const link = await waitFor('a[href="/application/pre-enrollment-home"]', 8000);   // only shown when signed in
+    if (!link || !['/', '/home'].includes(location.pathname.toLowerCase())) return;
+    GM_deleteValue('loginSeenAt');
+    const toast = document.createElement('div');
+    toast.style.cssText = 'position:fixed;top:70px;right:16px;z-index:99999;background:#e6f4ea;border:3px solid #1a7f37;border-radius:12px;padding:14px;font:16px sans-serif;font-weight:bold';
+    toast.textContent = '✔ Signed in — opening Apply for a document… / आवेदन खोल्दै…';
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 4000);
+    say('साइन इन भयो। आवेदन फारम खोल्दै।');
+    link.click();
   }
   pendingLogin();                             // drop anything older than 30 minutes
   route();
