@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    https://github.com/Moktan-26/nepal-gov-autofill
-// @version      8.2
-// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, opens Apply for a document after sign-in, picks New + 34 pages + Kathmandu office, printable slip. Captcha + Register stay manual.
+// @version      8.3
+// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, opens Apply for a document after sign-in, picks New + 34 pages + Kathmandu office, fills phone + email from the account, printable slip. Captcha + Register stay manual.
 // @match        https://online.nepalpassport.gov.np/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -490,6 +490,47 @@
     toast('✔ Kathmandu · Department of Passports<br>👉 Choose a date and time for your appointment / अपोइन्टमेन्टको मिति र समय छान्नुहोस्');
     say('काठमाडौं, राहदानी विभाग छानियो। अब अपोइन्टमेन्टको मिति र समय छान्नुहोस्।');
   }
+
+  // ---------- DEMOGRAPHIC STEP: phone + email from the signed-in account ----------
+  // The account's own details are on /account/edit; load that page invisibly and read them.
+  let accountInfo = null;
+  async function getAccountInfo() {
+    if (accountInfo) return accountInfo;
+    const f = document.createElement('iframe');
+    f.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;left:-9999px;border:0';
+    f.src = '/account/edit';
+    document.body.appendChild(f);
+    try {
+      for (let i = 0; i < 40; i++) {
+        await sleep(500);
+        const d = f.contentDocument;
+        const ph = d && d.querySelector('#phone'), em = d && d.querySelector('#email');
+        if (ph && em && em.value && ph.value.replace(/\D/g, '').length > 6) {
+          accountInfo = { phone: ph.value.trim(), email: em.value.trim() };
+          break;
+        }
+      }
+    } catch (e) { /* ignore */ }
+    f.remove();
+    return accountInfo;
+  }
+  const isEmptyPhone = v => v.replace(/\D/g, '').replace(/^977/, '').length === 0;
+  let contactBusy = false, contactDone = false;
+  async function fillContact() {
+    if (contactBusy || contactDone) return;
+    const ph = document.querySelector('#phoneNumber'), em = document.querySelector('#email');
+    if (!ph || !em || !visible(ph)) return;
+    if (!isEmptyPhone(ph.value) && em.value.trim()) { contactDone = true; return; }   // already filled
+    contactBusy = true;
+    const acc = await getAccountInfo();
+    contactBusy = false;
+    if (!acc) return;
+    if (isEmptyPhone(ph.value)) setVal('#phoneNumber', acc.phone);
+    if (!em.value.trim()) setVal('#email', acc.email);
+    contactDone = true;
+    toast('✔ Phone and email filled from your account / फोन र इमेल भरियो');
+  }
+  setInterval(() => { if (location.pathname.toLowerCase().startsWith('/application/integrated-enrollment')) fillContact(); }, 1000);
 
   // ---------- AFTER SIGN-IN: go straight to "Apply for a document" ----------
   // Only right after the login page (within 2 minutes), so normal visits to Home are left alone.
