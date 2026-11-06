@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
-// @namespace    roughdev
-// @version      7.1
+// @namespace    https://github.com/Moktan-26/nepal-gov-autofill
+// @version      7.2
 // @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, printable slip. Captcha + Register stay manual.
 // @match        https://online.nepalpassport.gov.np/*
 // @grant        GM_xmlhttpRequest
