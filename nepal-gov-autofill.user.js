@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    https://github.com/Moktan-26/nepal-gov-autofill
-// @version      8.3
-// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, opens Apply for a document after sign-in, picks New + 34 pages + Kathmandu office, fills phone + email from the account, printable slip. Captcha + Register stay manual.
+// @version      8.4
+// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, opens Apply for a document after sign-in, picks New + 34 pages + Kathmandu office, fills phone + email from the account, auto Next after choosing a time slot, printable slip. Captcha + Register stay manual.
 // @match        https://online.nepalpassport.gov.np/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -531,6 +531,24 @@
     toast('✔ Phone and email filled from your account / फोन र इमेल भरियो');
   }
   setInterval(() => { if (location.pathname.toLowerCase().startsWith('/application/integrated-enrollment')) fillContact(); }, 1000);
+
+  // ---------- TIME STEP: when the user taps a time slot, go Next by itself ----------
+  // Next here only opens the Appointment summary; the booking itself is confirmed on the summary page.
+  document.addEventListener('click', e => {
+    if (!e.isTrusted || !location.pathname.toLowerCase().startsWith('/application/integrated-enrollment')) return;
+    if (!e.target.closest || !e.target.closest('.time-item')) return;
+    setTimeout(async () => {
+      if (!document.querySelector('.time-item.active')) return;           // slot really selected
+      for (let i = 0; i < 10; i++) {
+        const next = byText('button', /^next/i);
+        if (next && !next.disabled && !next.classList.contains('p-disabled')) {
+          toast('✔ Time chosen — opening the appointment summary / समय छानियो');
+          next.click(); return;
+        }
+        await sleep(300);
+      }
+    }, 700);
+  }, true);
 
   // ---------- AFTER SIGN-IN: go straight to "Apply for a document" ----------
   // Only right after the login page (within 2 minutes), so normal visits to Home are left alone.
