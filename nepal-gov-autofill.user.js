@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    roughdev
-// @version      6.0
+// @version      6.1
 // @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, printable slip. Captcha + Register stay manual.
 // @match        https://online.nepalpassport.gov.np/account/register*
 // @grant        GM_xmlhttpRequest
@@ -22,19 +22,34 @@
   };
 
   // ---------- VOICE (spoken prompts only; no voice input) ----------
-  function say(text) {
-    return new Promise(res => {
-      try {
-        const u = new SpeechSynthesisUtterance(text);
-        const voices = speechSynthesis.getVoices();
-        u.voice = voices.find(v => v.lang.startsWith('ne')) || voices.find(v => v.lang.startsWith('hi')) || null;
-        u.lang = u.voice ? u.voice.lang : 'ne-NP';
-        u.rate = 0.9;
-        u.onend = res; u.onerror = res;
-        speechSynthesis.cancel(); speechSynthesis.speak(u);
-        setTimeout(res, 8000);               // never hang if no voice is installed
-      } catch (e) { res(); }
+  // Chrome loads its voice list a moment after page load, so wait for it once.
+  let voicePromise = null;
+  function getVoice() {
+    voicePromise = voicePromise || new Promise(r => {
+      const pick = () => {
+        const v = speechSynthesis.getVoices();
+        return v.find(x => /^ne/i.test(x.lang))
+          || v.find(x => /^hi/i.test(x.lang) && /google/i.test(x.name))
+          || v.find(x => /^hi/i.test(x.lang)) || null;
+      };
+      if (speechSynthesis.getVoices().length) return r(pick());
+      speechSynthesis.addEventListener('voiceschanged', () => r(pick()), { once: true });
+      setTimeout(() => r(pick()), 3000);
     });
+    return voicePromise;
+  }
+  let lastSaid = '';
+  async function say(text) {
+    lastSaid = text;
+    try {
+      const voice = await getVoice();
+      if (!voice) { msg('🔇 No Nepali/Hindi voice on this device — read the instructions on screen.'); return; }
+      speechSynthesis.cancel();
+      await new Promise(r => setTimeout(r, 100));   // Chrome drops speech that starts right after cancel()
+      const u = new SpeechSynthesisUtterance(text);
+      u.voice = voice; u.lang = voice.lang; u.rate = 0.9;
+      speechSynthesis.speak(u);
+    } catch (e) { /* speech is a bonus; never break the form */ }
   }
 
   // ---------- CARD READING (your server holds the AI key; nothing is stored) ----------
@@ -139,7 +154,8 @@
   box.style.cssText = 'position:fixed;top:70px;right:16px;z-index:99999;background:#fff;border:3px solid #c8102e;border-radius:12px;padding:14px;width:310px;max-height:85vh;overflow:auto;font:15px sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.25)';
   box.innerHTML = `
     <b style="color:#c8102e;font-size:17px">🪪 Nepal Gov Autofill</b>
-    <div id="k-ask" style="margin-top:8px;padding:10px;border-radius:8px;background:#fff4e5;font-size:16px;font-weight:bold"></div>
+    <div id="k-ask" title="Tap to hear again" style="margin-top:8px;padding:10px;border-radius:8px;background:#fff4e5;font-size:16px;font-weight:bold;cursor:pointer"></div>
+    <div style="font-size:11px;color:#888;margin-top:2px">🔊 Tap the instruction to hear it again / फेरि सुन्न थिच्नुहोस्</div>
     <label id="k-scan" style="display:block;margin-top:8px;padding:14px;background:#c8102e;color:#fff;text-align:center;border-radius:8px;cursor:pointer;font-size:17px">
       📷 NID कार्ड स्क्यान / Scan NID<input id="k-img" type="file" accept="image/*" capture="environment" hidden></label>
     <div id="k-fields" style="margin-top:6px"></div>
@@ -152,6 +168,7 @@
   const msg = t => ($('#k-msg').textContent = t);
   const ask = (t, color = '#fff4e5') => { $('#k-ask').textContent = t; $('#k-ask').style.background = color; };
   const input = k => $('#k-' + k);
+  $('#k-ask').onclick = () => lastSaid && say(lastSaid);
   const val = k => input(k).value.trim();
 
   FIELDS.forEach(f => {
@@ -200,7 +217,7 @@
   FIELDS.forEach(f => input(f.k).addEventListener('keydown', e => { if (e.key === 'Enter') $('#k-next').click(); }));
 
   // ---------- STEP 1: scan ----------
-  speechSynthesis.getVoices();
+  getVoice();
   ask('👉 Scan the front of your NID card / राष्ट्रिय परिचयपत्रको अगाडिको फोटो खिच्नुहोस्');
   setTimeout(() => say('नमस्ते। कृपया आफ्नो राष्ट्रिय परिचयपत्रको अगाडिको फोटो खिच्नुहोस्।'), 800);
 
