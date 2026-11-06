@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    https://github.com/Moktan-26/nepal-gov-autofill
-// @version      8.4
+// @version      8.5
 // @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, opens Apply for a document after sign-in, picks New + 34 pages + Kathmandu office, fills phone + email from the account, auto Next after choosing a time slot, printable slip. Captcha + Register stay manual.
 // @match        https://online.nepalpassport.gov.np/*
 // @grant        GM_xmlhttpRequest
@@ -515,20 +515,24 @@
     return accountInfo;
   }
   const isEmptyPhone = v => v.replace(/\D/g, '').replace(/^977/, '').length === 0;
-  let contactBusy = false, contactDone = false;
+  // Fill each new phone/email box once (the page re-draws them, e.g. on the Appointment summary)
+  let contactBusy = false;
+  const filledBoxes = new WeakSet();
   async function fillContact() {
-    if (contactBusy || contactDone) return;
+    if (contactBusy) return;
     const ph = document.querySelector('#phoneNumber'), em = document.querySelector('#email');
-    if (!ph || !em || !visible(ph)) return;
-    if (!isEmptyPhone(ph.value) && em.value.trim()) { contactDone = true; return; }   // already filled
+    if (!ph || !em || !visible(ph) || filledBoxes.has(ph)) return;
+    if (!isEmptyPhone(ph.value) && em.value.trim()) { filledBoxes.add(ph); return; }   // already filled
     contactBusy = true;
     const acc = await getAccountInfo();
     contactBusy = false;
-    if (!acc) return;
+    if (!acc || !ph.isConnected) return;
     if (isEmptyPhone(ph.value)) setVal('#phoneNumber', acc.phone);
     if (!em.value.trim()) setVal('#email', acc.email);
-    contactDone = true;
-    toast('✔ Phone and email filled from your account / फोन र इमेल भरियो');
+    filledBoxes.add(ph);
+    toast('✔ Phone and email filled from your account / फोन र इमेल भरियो<br>👉 Type the captcha / क्याप्चा लेख्नुहोस्');
+    const cap = document.querySelector('#captcha');
+    if (cap && visible(cap)) cap.focus();
   }
   setInterval(() => { if (location.pathname.toLowerCase().startsWith('/application/integrated-enrollment')) fillContact(); }, 1000);
 
