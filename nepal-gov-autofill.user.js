@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    https://github.com/Moktan-26/nepal-gov-autofill
-// @version      8.5
-// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, opens Apply for a document after sign-in, picks New + 34 pages + Kathmandu office, fills phone + email from the account, auto Next after choosing a time slot, printable slip. Captcha + Register stay manual.
+// @version      8.6
+// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, opens Apply for a document after sign-in, picks New + 34 pages + Kathmandu office, fills phone + email from the account, auto Next after choosing a time slot, citizenship certificate scan on the Demographic step, printable slip. Captcha + Register stay manual.
 // @match        https://online.nepalpassport.gov.np/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -553,6 +553,74 @@
       }
     }, 700);
   }, true);
+
+  // ---------- DEMOGRAPHIC STEP: scan the citizenship certificate ----------
+  // Fills: Citizenship number, Place of birth, Place of issue (district), Date of issue (BS).
+  const norm = t => (t || '').toLowerCase().replace(/[^a-z]/g, '');
+  const labelOf = el => { let p = el.parentElement, t = ''; for (let i = 0; i < 5 && p && !t; i++, p = p.parentElement) { const l = p.querySelector('label'); t = l ? txt(l) : ''; } return t; };
+  // type into a box like a person would (works with the site's masked date boxes too)
+  function typeInto(el, value) {
+    el.focus(); el.select && el.select();
+    if (!document.execCommand('insertText', false, value)) setVal('#' + el.id, value);
+    el.dispatchEvent(new Event('change', { bubbles: true })); el.dispatchEvent(new Event('blur', { bubbles: true }));
+  }
+  // choose a district in a dropdown even if the spelling differs a little (Kavre / Kavrepalanchok)
+  async function pickDistrict(dd, name) {
+    if (!dd || !name) return false;
+    const want = norm(name);
+    const cur = dd.querySelector('.p-dropdown-label:not(.p-placeholder)'); if (cur && txt(cur)) return true;   // already chosen
+    for (let tries = 0; tries < 10; tries++) {
+      (dd.querySelector('.p-dropdown-trigger') || dd).click();
+      await sleep(600);
+      const opts = [...document.querySelectorAll('.p-dropdown-panel li[role=option], .p-dropdown-items li')];
+      if (opts.length > 1) {
+        const n = li => norm(txt(li).split('/')[0]);
+        const hit = opts.find(li => n(li) === want)
+          || opts.find(li => n(li).startsWith(want.slice(0, 5)) || want.startsWith(n(li).slice(0, 5)));
+        if (hit) { hit.click(); await sleep(600); return true; }
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        return false;
+      }
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await sleep(500);
+    }
+    return false;
+  }
+
+  const citShown = new WeakSet();
+  function offerCitizenshipScan() {
+    const cit = document.querySelector('#minorID');
+    if (!cit || !visible(cit) || citShown.has(cit) || cit.value.trim()) return;
+    citShown.add(cit);
+    toast(`👉 Scan the citizenship certificate (front, and back if needed)<br>नागरिकताको प्रमाणपत्रको फोटो खिच्नुहोस्
+      <label style="display:block;margin-top:10px;padding:12px;background:#c8102e;color:#fff;text-align:center;border-radius:8px;cursor:pointer">
+      📷 Scan citizenship / नागरिकता स्क्यान<input id="k-cit" type="file" accept="image/*" multiple hidden></label>
+      <div id="k-cit-msg" style="margin-top:6px;font-weight:normal;font-size:13px"></div>`, '#fff4e5');
+    say('अब नागरिकताको प्रमाणपत्रको फोटो खिच्नुहोस्।');
+    const input = toastEl.querySelector('#k-cit'), note = t => { const m = toastEl && toastEl.querySelector('#k-cit-msg'); if (m) m.innerHTML = t; };
+    input.onchange = async () => {
+      const files = [...input.files].slice(0, 2);
+      if (!files.length) return;
+      note('⏳ Reading certificate… / पढ्दै…');
+      try {
+        const images = [];
+        for (const f of files) images.push(await toJpegBase64(f));
+        const d = await post(CONFIG.scanServer, { kind: 'citizenship', images });
+        const done = [], missing = [];
+        const box = document.querySelector('#minorID');
+        if (d.citizenshipNo && box && !box.value.trim()) { typeInto(box, d.citizenshipNo); done.push('Citizenship no.'); } else if (!d.citizenshipNo) missing.push('Citizenship no.');
+        const birthDD = [...document.querySelectorAll('.p-dropdown')].find(x => /place of birth/i.test(labelOf(x)));
+        if (await pickDistrict(birthDD, d.birthDistrict)) done.push('Place of birth'); else missing.push('Place of birth');
+        if (await pickDistrict(document.querySelector('#minorIDPlaceOfIssue'), d.issueDistrict)) done.push('Place of issue'); else missing.push('Place of issue');
+        const date = document.querySelector('#minorIDDateOfIssue');
+        if (d.issueDateBS && date && !date.value.replace(/[_\-\s]/g, '')) { typeInto(date, d.issueDateBS); done.push('Date of issue'); } else if (!d.issueDateBS) missing.push('Date of issue');
+        note((done.length ? '✔ Filled: ' + done.join(', ') : '') + (missing.length ? '<br>⚠ Please fill yourself: ' + missing.join(', ') : '') + '<br>👉 Check them against the certificate / प्रमाणपत्रसँग मिलाउनुहोस्');
+        say(missing.length ? 'केही विवरण भरियो। बाँकी आफैं भर्नुहोस्।' : 'नागरिकताको विवरण भरियो। प्रमाणपत्रसँग मिलाएर जाँच्नुहोस्।');
+      } catch (err) { note('❌ ' + err.message); }
+      input.value = '';
+    };
+  }
+  setInterval(() => { if (location.pathname.toLowerCase().startsWith('/application/integrated-enrollment')) offerCitizenshipScan(); }, 1000);
 
   // ---------- AFTER SIGN-IN: go straight to "Apply for a document" ----------
   // Only right after the login page (within 2 minutes), so normal visits to Home are left alone.
