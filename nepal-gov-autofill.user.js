@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    roughdev
-// @version      5.0
-// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, Nepali voice prompts, auto password, printable slip. Captcha + Register stay manual.
+// @version      6.0
+// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, printable slip. Captcha + Register stay manual.
 // @match        https://online.nepalpassport.gov.np/account/register*
 // @grant        GM_xmlhttpRequest
 // @connect      nepal-gov-autofill.tamang-subash36.workers.dev
@@ -21,7 +21,7 @@
     scanServer: 'https://nepal-gov-autofill.tamang-subash36.workers.dev/scan',  // reads the NID card (holds the AI key)
   };
 
-  // ---------- VOICE ----------
+  // ---------- VOICE (spoken prompts only; no voice input) ----------
   function say(text) {
     return new Promise(res => {
       try {
@@ -32,29 +32,8 @@
         u.rate = 0.9;
         u.onend = res; u.onerror = res;
         speechSynthesis.cancel(); speechSynthesis.speak(u);
+        setTimeout(res, 8000);               // never hang if no voice is installed
       } catch (e) { res(); }
-    });
-  }
-
-  const DEV = { '०':'0','१':'1','२':'2','३':'3','४':'4','५':'5','६':'6','७':'7','८':'8','९':'9' };
-  const WORDS = { 'शून्य':'0','सुन्य':'0','एक':'1','दुई':'2','तीन':'3','तिन':'3','चार':'4','पाँच':'5','पांच':'5',
-    'छ':'6','सात':'7','आठ':'8','नौ':'9','zero':'0','one':'1','two':'2','three':'3','four':'4','five':'5',
-    'six':'6','seven':'7','eight':'8','nine':'9' };
-  function toDigits(s) {
-    s = s.replace(/[०-९]/g, d => DEV[d]);
-    Object.entries(WORDS).forEach(([w, d]) => (s = s.split(w).join(d)));
-    return s.replace(/\D/g, '');
-  }
-
-  function listen() {
-    return new Promise(res => {
-      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!SR) return res('');
-      const r = new SR();
-      r.lang = 'ne-NP'; r.interimResults = false; r.maxAlternatives = 3;
-      r.onresult = e => res([...e.results[0]].map(a => a.transcript).join(' '));
-      r.onerror = () => res(''); r.onend = () => res('');
-      r.start();
     });
   }
 
@@ -139,90 +118,169 @@
     } catch { return false; }
   }
 
+  // ---------- FIELDS: what each needs, how to check it, what to say ----------
+  const FIELDS = [
+    { k: 'given',   label: 'Given name / नाम',         ne: 'कृपया आफ्नो नाम लेख्नुहोस्।',            en: 'Please enter your given name',
+      ok: v => /^[A-Za-z][A-Za-z .'-]*$/.test(v), bad: 'Use English letters only' },
+    { k: 'surname', label: 'Surname / थर',             ne: 'कृपया आफ्नो थर लेख्नुहोस्।',              en: 'Please enter your surname',
+      ok: v => /^[A-Za-z][A-Za-z .'-]*$/.test(v), bad: 'Use English letters only' },
+    { k: 'dob',     label: 'DOB (AD) / जन्म मिति',      ne: 'कृपया जन्म मिति ईस्वी सम्वतमा लेख्नुहोस्।', en: 'Please enter date of birth in AD, like 2000-01-13',
+      ok: v => /^\d{4}-\d{2}-\d{2}$/.test(v) && +v.slice(0, 4) >= 1920 && +v.slice(0, 4) <= new Date().getFullYear() - 16, bad: 'Format: YYYY-MM-DD (AD)' },
+    { k: 'nin',     label: 'NIN / राष्ट्रिय परिचय नं.',   ne: 'कृपया राष्ट्रिय परिचय नम्बर लेख्नुहोस्।',   en: 'Please enter your NIN (10 digits)',
+      ok: v => /^\d{10}$/.test(v.replace(/\D/g, '')), bad: 'NIN must be 10 digits' },
+    { k: 'phone',   label: 'Mobile / मोबाइल नम्बर',     ne: 'कृपया आफ्नो मोबाइल नम्बर लेख्नुहोस्।',     en: 'Please enter your mobile number (98XXXXXXXX)',
+      ok: v => /^9[678]\d{8}$/.test(v.replace(/\D/g, '').replace(/^977/, '')), bad: 'Mobile must be 10 digits starting 96/97/98' },
+    { k: 'email',   label: 'Email / इमेल',              ne: 'कृपया आफ्नो इमेल लेख्नुहोस्।',            en: 'Please enter your email address',
+      ok: v => /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(v), bad: 'Check the email (example: name@gmail.com)' },
+  ];
+
   // ---------- UI ----------
   const box = document.createElement('div');
-  box.style.cssText = 'position:fixed;top:70px;right:16px;z-index:99999;background:#fff;border:3px solid #c8102e;border-radius:12px;padding:14px;width:300px;font:15px sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.25)';
+  box.style.cssText = 'position:fixed;top:70px;right:16px;z-index:99999;background:#fff;border:3px solid #c8102e;border-radius:12px;padding:14px;width:310px;max-height:85vh;overflow:auto;font:15px sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.25)';
   box.innerHTML = `
     <b style="color:#c8102e;font-size:17px">🪪 Nepal Gov Autofill</b>
-    <label style="display:block;margin-top:10px;padding:14px;background:#c8102e;color:#fff;text-align:center;border-radius:8px;cursor:pointer;font-size:17px">
-      📷 1. NID कार्ड स्क्यान<input id="k-img" type="file" accept="image/*" capture="environment" hidden></label>
-    <div id="k-fields" style="margin-top:8px"></div>
-    <button id="k-mic" style="width:100%;margin-top:8px;padding:12px;font-size:16px;border-radius:8px;border:1px solid #c8102e;background:#fff">🎤 2. फोन नम्बर बोल्नुहोस्</button>
-    <button id="k-go" style="width:100%;margin-top:8px;padding:12px;font-size:16px;border-radius:8px;border:0;background:#1a7f37;color:#fff">✅ 3. फारम भर्नुहोस्</button>
-    <div id="k-msg" style="margin-top:8px;font-size:14px"></div>`;
+    <div id="k-ask" style="margin-top:8px;padding:10px;border-radius:8px;background:#fff4e5;font-size:16px;font-weight:bold"></div>
+    <label id="k-scan" style="display:block;margin-top:8px;padding:14px;background:#c8102e;color:#fff;text-align:center;border-radius:8px;cursor:pointer;font-size:17px">
+      📷 NID कार्ड स्क्यान / Scan NID<input id="k-img" type="file" accept="image/*" capture="environment" hidden></label>
+    <div id="k-fields" style="margin-top:6px"></div>
+    <button id="k-next" style="width:100%;margin-top:10px;padding:12px;font-size:16px;border-radius:8px;border:0;background:#1a7f37;color:#fff">अर्को / Next ➜</button>
+    <div id="k-review" style="display:none"></div>
+    <div id="k-msg" style="margin-top:8px;font-size:13px;color:#555"></div>`;
   document.body.appendChild(box);
 
-  const msg = t => (box.querySelector('#k-msg').textContent = t);
-  const F = [['given','Given name'],['surname','Surname'],['dob','DOB AD yyyy-mm-dd'],['nin','NIN'],['phone','Mobile 98XXXXXXXX'],['email','Email']];
-  const fWrap = box.querySelector('#k-fields');
-  F.forEach(([k, l]) => {
-    const i = document.createElement('input');
-    i.id = 'k-' + k; i.placeholder = l;
-    i.style.cssText = 'width:100%;box-sizing:border-box;margin-top:5px;padding:7px;border:1px solid #ccc;border-radius:5px;font-size:15px';
-    if (k === 'email') i.value = CONFIG.fallbackEmail;
-    fWrap.appendChild(i);
-  });
-  const val = k => box.querySelector('#k-' + k).value.trim();
-  const put = (k, v) => (box.querySelector('#k-' + k).value = v || '');
+  const $ = q => box.querySelector(q);
+  const msg = t => ($('#k-msg').textContent = t);
+  const ask = (t, color = '#fff4e5') => { $('#k-ask').textContent = t; $('#k-ask').style.background = color; };
+  const input = k => $('#k-' + k);
+  const val = k => input(k).value.trim();
 
-  speechSynthesis.getVoices(); // warm up voice list
+  FIELDS.forEach(f => {
+    const wrap = document.createElement('div');
+    wrap.style.marginTop = '6px';
+    wrap.innerHTML = `<div style="font-size:12px;color:#555">${f.label}</div>
+      <input id="k-${f.k}" style="width:100%;box-sizing:border-box;padding:8px;border:2px solid #ccc;border-radius:6px;font-size:16px">
+      <div id="k-${f.k}-err" style="font-size:12px;color:#c8102e"></div>`;
+    $('#k-fields').appendChild(wrap);
+  });
+  input('phone').inputMode = 'numeric'; input('nin').inputMode = 'numeric';
+  input('email').type = 'email'; input('email').value = CONFIG.fallbackEmail;
+
+  const mark = (k, state) => {               // '', 'ok', 'need', 'bad'
+    const el = input(k);
+    el.style.borderColor = { ok: '#1a7f37', need: '#e69500', bad: '#c8102e' }[state] || '#ccc';
+    el.style.background = state === 'need' ? '#fffbe6' : '#fff';
+  };
+
+  // Find the first field that is empty or wrong, point at it, say what to do
+  async function guide() {
+    for (const f of FIELDS) {
+      const v = val(f.k);
+      const err = $('#k-' + f.k + '-err');
+      if (!v || !f.ok(v)) {
+        FIELDS.forEach(g => g.k !== f.k && val(g.k) && g.ok(val(g.k)) && mark(g.k, 'ok'));
+        mark(f.k, v ? 'bad' : 'need');
+        err.textContent = v ? f.bad : '';
+        ask('👉 ' + f.en + ' / ' + f.ne);
+        input(f.k).scrollIntoView({ block: 'center' });
+        input(f.k).focus();
+        say(f.ne);
+        return false;
+      }
+      err.textContent = ''; mark(f.k, 'ok');
+    }
+    return true;
+  }
+
+  // Live check as the user types
+  FIELDS.forEach(f => input(f.k).addEventListener('input', () => {
+    const v = val(f.k);
+    mark(f.k, !v ? 'need' : f.ok(v) ? 'ok' : 'bad');
+    $('#k-' + f.k + '-err').textContent = v && !f.ok(v) ? f.bad : '';
+  }));
+  FIELDS.forEach(f => input(f.k).addEventListener('keydown', e => { if (e.key === 'Enter') $('#k-next').click(); }));
+
+  // ---------- STEP 1: scan ----------
+  speechSynthesis.getVoices();
+  ask('👉 Scan the front of your NID card / राष्ट्रिय परिचयपत्रको अगाडिको फोटो खिच्नुहोस्');
   setTimeout(() => say('नमस्ते। कृपया आफ्नो राष्ट्रिय परिचयपत्रको अगाडिको फोटो खिच्नुहोस्।'), 800);
 
-  box.querySelector('#k-img').onchange = async e => {
+  $('#k-img').onchange = async e => {
     const file = e.target.files[0]; if (!file) return;
     e.target.value = '';
+    ask('⏳ Reading card… / कार्ड पढ्दै…');
     try {
       const d = await readCard(file);
-      put('given', d.given); put('surname', d.surname); put('dob', d.dob); put('nin', d.nin);
-      const missing = ['given','surname','dob','nin'].filter(k => !d[k]);
-      if (missing.length) {
-        msg('⚠ Could not read: ' + missing.join(', ') + '. Retake photo or type it.');
-        await say('कार्ड राम्रोसँग पढ्न सकिएन। फेरि फोटो खिच्नुहोस्।');
-      } else {
-        msg('✔ Card read. Operator: check every field against the card.');
-        await say(`तपाईंको नाम ${d.given} ${d.surname}। जन्म मिति ${d.dob.split('-').join(' ')}। यो सही हो?`);
-      }
-    } catch (err) { msg('❌ ' + err.message); }
+      ['given', 'surname', 'dob', 'nin'].forEach(k => { if (d[k]) input(k).value = d[k]; });
+      const got = ['given', 'surname', 'dob', 'nin'].filter(k => d[k]).length;
+      msg(got === 4 ? '✔ Card read. Check each field against the card.' : `Read ${got} of 4 details from the card.`);
+      if (got === 0) { ask('⚠ Could not read the card. Retake the photo (flat, good light) or type the details. / फेरि फोटो खिच्नुहोस्', '#ffe5e5'); say('कार्ड पढ्न सकिएन। फेरि फोटो खिच्नुहोस्।'); return; }
+      await guide();
+    } catch (err) { ask('❌ ' + err.message, '#ffe5e5'); }
   };
 
-  box.querySelector('#k-mic').onclick = async () => {
-    await say('कृपया आफ्नो मोबाइल नम्बर बोल्नुहोस्।');
-    msg('🎤 Listening…');
-    let d = toDigits(await listen());
-    if (d.startsWith('977')) d = d.slice(3);
-    if (/^9\d{9}$/.test(d)) {
-      put('phone', d); msg('✔ Phone: ' + d);
-      await say('तपाईंको नम्बर ' + d.split('').join(' ') + '। सही हो?');
-    } else {
-      msg('Heard "' + d + '" — not a valid 10-digit number. Try again or type it.');
-      await say('नम्बर बुझिएन। फेरि बोल्नुहोस्।');
-    }
-  };
+  // ---------- STEP 2: fill missing fields one by one ----------
+  $('#k-next').onclick = async () => { if (await guide()) review(); };
 
-  box.querySelector('#k-go').onclick = async () => {
-    const d = Object.fromEntries(F.map(([k]) => [k, val(k)]));
-    const bad = [];
-    if (!d.given || !d.surname) bad.push('name');
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(d.dob)) bad.push('DOB');
-    if (!/^\d{10}$/.test(d.nin.replace(/\D/g, ''))) bad.push('NIN');
-    if (!/^9\d{9}$/.test(d.phone.replace(/\D/g, '').replace(/^977/, ''))) bad.push('phone');
-    if (!/^\S+@\S+\.\S+$/.test(d.email)) bad.push('email');
-    if (bad.length) return msg('Fix: ' + bad.join(', '));
+  // ---------- STEP 3: confirmation 1 — review everything before filling ----------
+  function review() {
+    const d = Object.fromEntries(FIELDS.map(f => [f.k, val(f.k)]));
+    d.nin = d.nin.replace(/\D/g, '');
+    d.phone = d.phone.replace(/\D/g, '').replace(/^977/, '');
+    d.email = d.email.toLowerCase();
+    const row = (l, v) => `<tr><td style="color:#555;padding:4px 6px 4px 0;font-size:13px">${l}</td><td style="font-weight:bold;font-size:16px;word-break:break-all">${v}</td></tr>`;
+    $('#k-fields').style.display = 'none'; $('#k-next').style.display = 'none'; $('#k-scan').style.display = 'none';
+    $('#k-review').style.display = 'block';
+    $('#k-review').innerHTML = `<table style="width:100%;margin-top:8px;border-collapse:collapse">
+        ${row('Name / नाम', d.given + ' ' + d.surname)}${row('DOB (AD)', d.dob)}${row('NIN', d.nin)}
+        ${row('Mobile', '+977 ' + d.phone)}${row('Email', d.email)}</table>
+      <button id="k-yes" style="width:100%;margin-top:10px;padding:12px;font-size:16px;border-radius:8px;border:0;background:#1a7f37;color:#fff">✅ सबै सही छ / All correct — fill form</button>
+      <button id="k-edit" style="width:100%;margin-top:6px;padding:10px;font-size:15px;border-radius:8px;border:1px solid #999;background:#fff">✏️ सच्याउनुहोस् / Edit</button>`;
+    ask('👉 Check all details carefully / सबै विवरण ध्यानले जाँच्नुहोस्');
+    say(`कृपया जाँच्नुहोस्। नाम ${d.given} ${d.surname}। जन्म मिति ${d.dob.split('-').join(' ')}। मोबाइल ${d.phone.split('').join(' ')}। सबै सही छ भने हरियो बटन थिच्नुहोस्।`);
+    $('#k-edit').onclick = backToEdit;
+    $('#k-yes').onclick = () => fillForm(d);
+  }
 
+  function backToEdit() {
+    $('#k-review').style.display = 'none';
+    $('#k-fields').style.display = 'block'; $('#k-next').style.display = 'block'; $('#k-scan').style.display = 'block';
+    ask('✏️ Fix the details, then press Next / सच्याएर Next थिच्नुहोस्');
+  }
+
+  // ---------- STEP 4: fill the real form, then confirmation 2 on the form itself ----------
+  async function fillForm(d) {
     d.pass = genPassword();
     setVal('#entityName', d.given);
     setVal('#entitySurname', d.surname);
     setVal('[name="entityDateOfBirth"]', d.dob);
-    setVal('#entityId', d.nin.replace(/\D/g, ''));
-    setVal('#email', d.email.toLowerCase());
-    setVal('#phone', '+977' + d.phone.replace(/\D/g, '').replace(/^977/, ''));
+    setVal('#entityId', d.nin);
+    setVal('#email', d.email);
+    setVal('#phone', '+977' + d.phone);
     setVal('[name="password"],[name="repeatPassword"]', d.pass);
 
+    // check the page actually kept every value
+    const want = { '#entityName': d.given, '#entitySurname': d.surname, '[name="entityDateOfBirth"]': d.dob,
+      '#entityId': d.nin, '#email': d.email, '#phone': '+977' + d.phone };
+    const missed = Object.entries(want).filter(([q, v]) => (document.querySelector(q)?.value || '').trim() !== v);
+
     const sent = await sendSMS(d.phone, `Passport portal login. Username: ${d.email} Password: ${d.pass}`);
+    $('#k-review').innerHTML = `<div style="margin-top:8px;padding:10px;border:2px dashed #1a7f37;border-radius:8px">
+        <div style="font-size:13px">Password / पासवर्ड:</div>
+        <div style="font:22px monospace;letter-spacing:2px;margin:4px 0">${d.pass}</div>
+        <div style="font-size:12px;color:#555">${sent ? 'Sent by SMS.' : 'Printed on the slip.'} Keep it safe.</div></div>
+      <button id="k-ok2" style="width:100%;margin-top:10px;padding:12px;font-size:16px;border-radius:8px;border:0;background:#1a7f37;color:#fff">✅ फारम सही छ / The form is correct</button>
+      <button id="k-edit2" style="width:100%;margin-top:6px;padding:10px;font-size:15px;border-radius:8px;border:1px solid #999;background:#fff">✏️ सच्याउनुहोस् / Edit</button>`;
     printSlip(d);
-    msg(`✔ Filled. Password: ${d.pass} ${sent ? '(SMS sent)' : '(printed, no SMS)'}. Type captcha → Register.`);
-    const cap = document.querySelector('#captcha');
-    if (cap) { cap.scrollIntoView({ block: 'center' }); cap.focus(); }
-    await say('फारम भरियो। तपाईंको पासवर्ड कागजमा छापिएको छ। सुरक्षित राख्नुहोस्।');
-  };
+    if (missed.length) ask('⚠ Some fields did not fill. Check the form on the left and fix them there. / केही खाली छ, बायाँको फारम जाँच्नुहोस्', '#ffe5e5');
+    else ask('👉 Look at the form on the left: is everything correct? / बायाँको फारम सही छ?');
+    say('फारम भरियो। कृपया बायाँको फारम फेरि जाँच्नुहोस्।');
+    $('#k-edit2').onclick = backToEdit;
+    $('#k-ok2').onclick = () => {
+      $('#k-review').innerHTML = '';
+      ask('✔ Now type the captcha and click Register / अब क्याप्चा लेखेर Register थिच्नुहोस्', '#e6f4ea');
+      say('अब क्याप्चा लेखेर रजिस्टर थिच्नुहोस्।');
+      const cap = document.querySelector('#captcha');
+      if (cap) { cap.scrollIntoView({ block: 'center' }); cap.focus(); }
+    };
+  }
 })();
