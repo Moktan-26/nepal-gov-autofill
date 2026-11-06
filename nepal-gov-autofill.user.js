@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    roughdev
-// @version      7.0
+// @version      7.1
 // @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, printable slip. Captcha + Register stay manual.
 // @match        https://online.nepalpassport.gov.np/*
 // @grant        GM_xmlhttpRequest
@@ -23,6 +23,9 @@
     smsEndpoint: '',            // your SMS backend URL: POST {phone, message}. Empty = no SMS, just print slip
     scanServer: 'https://nepal-gov-autofill.tamang-subash36.workers.dev/scan',  // reads the NID card (holds the AI key)
   };
+
+  // Status line in whichever panel is open (set when a panel is built)
+  let msg = () => {};
 
   // ---------- VOICE (spoken prompts only; no voice input) ----------
   // Chrome loads its voice list a moment after page load, so wait for it once.
@@ -172,7 +175,7 @@
   document.body.appendChild(box);
 
   const $ = q => box.querySelector(q);
-  const msg = t => ($('#k-msg').textContent = t);
+  msg = t => ($('#k-msg').textContent = t);
   const ask = (t, color = '#fff4e5') => { $('#k-ask').textContent = t; $('#k-ask').style.background = color; };
   const input = k => $('#k-' + k);
   $('#k-ask').onclick = () => lastSaid && say(lastSaid);
