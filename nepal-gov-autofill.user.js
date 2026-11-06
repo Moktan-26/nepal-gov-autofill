@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    https://github.com/Moktan-26/nepal-gov-autofill
-// @version      8.6
-// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, opens Apply for a document after sign-in, picks New + 34 pages + Kathmandu office, fills phone + email from the account, auto Next after choosing a time slot, citizenship certificate scan on the Demographic step, printable slip. Captcha + Register stay manual.
+// @version      8.7
+// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, opens Apply for a document after sign-in, picks New + 34 pages + Kathmandu office, fills phone + email from the account, auto Next after choosing a time slot, citizenship certificate scan on the Demographic step, auto-uploads NID + citizenship on Supporting documents, printable slip. Captcha + Register stay manual.
 // @match        https://online.nepalpassport.gov.np/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -93,6 +93,7 @@
   async function readCard(file) {
     msg('Preparing photo…');
     const b64 = await toJpegBase64(file);
+    savePhotos('nid', [b64]);                // kept briefly for the Supporting documents step
     msg('Reading card…');
     const d = await post(CONFIG.scanServer, { image: b64 });
     // sanity checks so a bad read never slips through
@@ -475,6 +476,7 @@
   let locDone = false;
   async function chooseLocation() {
     if (locDone) return;
+    if (!await waitFor('#amsProvince', 6000)) return;      // not on the location step (e.g. a draft resumed later): stay quiet
     const ok = await pickDropdown('amsProvince', CONFIG.province)
       && await pickDropdown('amsDistrict', CONFIG.district)
       && await pickDropdown('amsProvider', CONFIG.office);
@@ -605,6 +607,7 @@
       try {
         const images = [];
         for (const f of files) images.push(await toJpegBase64(f));
+        savePhotos('citizenship', images);     // kept briefly for the Supporting documents step
         const d = await post(CONFIG.scanServer, { kind: 'citizenship', images });
         const done = [], missing = [];
         const box = document.querySelector('#minorID');
@@ -621,6 +624,95 @@
     };
   }
   setInterval(() => { if (location.pathname.toLowerCase().startsWith('/application/integrated-enrollment')) offerCitizenshipScan(); }, 1000);
+
+  // ---------- SUPPORTING DOCUMENTS: upload the NID + citizenship photos by themselves ----------
+  // Photos from the earlier scans are kept on this device only, for 3 hours at most,
+  // and deleted as soon as they are uploaded.
+  const PHOTO_MS = 3 * 60 * 60 * 1000;
+  function savePhotos(kind, imgs) { try { GM_setValue('photos_' + kind, { imgs, t: Date.now() }); } catch (e) { /* too big for storage: skip */ } }
+  function loadPhotos(kind) {
+    const p = GM_getValue('photos_' + kind, null);
+    if (p && Date.now() - p.t < PHOTO_MS && p.imgs && p.imgs.length) return p.imgs;
+    if (p) GM_deleteValue('photos_' + kind);
+    return null;
+  }
+  // make a base64 JPEG fit under the site's 1 MB limit
+  async function b64ToFile(b64, name) {
+    let blob = await (await fetch('data:image/jpeg;base64,' + b64)).blob();
+    if (blob.size > 950 * 1024) {
+      const img = new Image(); img.src = URL.createObjectURL(blob); await img.decode();
+      const c = document.createElement('canvas');
+      for (const [px, q] of [[1600, 0.8], [1400, 0.7], [1200, 0.6], [1000, 0.55]]) {
+        const k = Math.min(1, px / Math.max(img.naturalWidth, img.naturalHeight));
+        c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        blob = await new Promise(r => c.toBlob(r, 'image/jpeg', q));
+        if (blob.size <= 950 * 1024) break;
+      }
+      URL.revokeObjectURL(img.src);
+    }
+    return new File([blob], name, { type: 'image/jpeg' });
+  }
+  const scanStatus = () => { const m = txt(document.body).match(/Selected scan target: ([^.]+)\. Scans uploaded: (\d+)\/(\d+)/); return m ? { target: m[1], done: +m[2], max: +m[3] } : null; };
+  async function selectTarget(re) {
+    const li = [...document.querySelectorAll('li.p-listbox-item')].find(l => re.test(txt(l)));
+    if (!li) return false;
+    li.click();
+    for (let i = 0; i < 20; i++) { await sleep(250); const st = scanStatus(); if (st && re.test(st.target)) return true; }
+    return false;
+  }
+  // put the photos into the upload box for one document type; returns how many were attached
+  async function uploadPhotos(re, imgs, label) {
+    if (!imgs || !imgs.length || !await selectTarget(re)) return 0;
+    let n = 0;
+    for (let i = 0; i < imgs.length; i++) {
+      const st = scanStatus();
+      if (!st || st.done >= st.max) break;
+      const input = document.querySelector('input[type=file]');
+      if (!input) break;
+      const dt = new DataTransfer(); dt.items.add(await b64ToFile(imgs[i], label + '-' + (i + 1) + '.jpg'));
+      input.files = dt.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      for (let w = 0; w < 60; w++) { await sleep(250); const s2 = scanStatus(); if (s2 && s2.done > st.done) { n++; break; } }
+    }
+    return n;
+  }
+  async function pickToB64(input) { const out = []; for (const f of [...input.files].slice(0, 2)) out.push(await toJpegBase64(f)); input.value = ''; return out; }
+
+  const docsSeen = new WeakSet();
+  let docsBusy = false;
+  async function onDocsStep() {
+    const input = document.querySelector('input[type=file]');
+    if (docsBusy || !input || docsSeen.has(input) || !scanStatus()) return;
+    docsSeen.add(input); docsBusy = true;
+    const line = (ok, t) => (ok ? '✔ ' : '👉 ') + t;
+    const render = (cit, nid) => {
+      const cs = (scanStatus() && /citizenship/i.test(scanStatus().target)) ? ' (' + scanStatus().done + '/' + scanStatus().max + ')' : '';
+      toast(`${line(cit, 'Citizenship certificate (both sides)' + (cit ? ' uploaded' : cs))}<br>${line(nid, 'National eID' + (nid ? ' uploaded' : ''))}
+        ${cit ? '' : '<label style="display:block;margin-top:8px;padding:10px;background:#c8102e;color:#fff;text-align:center;border-radius:8px;cursor:pointer">📷 Add citizenship (front + back)<input id="k-up-cit" type="file" accept="image/*" multiple hidden></label>'}
+        ${nid ? '' : '<label style="display:block;margin-top:8px;padding:10px;background:#c8102e;color:#fff;text-align:center;border-radius:8px;cursor:pointer">📷 Add National eID photo<input id="k-up-nid" type="file" accept="image/*" hidden></label>'}
+        <div id="k-up-msg" style="margin-top:6px;font-weight:normal;font-size:13px"></div>`, cit && nid ? '#e6f4ea' : '#fff4e5');
+      const note = t => { const m = toastEl && toastEl.querySelector('#k-up-msg'); if (m) m.textContent = t; };
+      const ci = toastEl.querySelector('#k-up-cit'), ni = toastEl.querySelector('#k-up-nid');
+      if (ci) ci.onchange = async () => { note('⏳ Uploading…'); const ok = await uploadPhotos(/citizenship/i, await pickToB64(ci), 'citizenship') > 0; await check(); render(state.cit, state.nid); if (!ok) note('⚠ Could not upload — use the site\'s Add button'); else if (!state.cit) note('👉 Add the other side too / अर्को पाटो पनि थप्नुहोस्'); };
+      if (ni) ni.onchange = async () => { note('⏳ Uploading…'); const ok = await uploadPhotos(/national eid/i, await pickToB64(ni), 'nid') > 0; await check(); render(state.cit, state.nid); if (!ok) note('⚠ Could not upload — use the site\'s Add button'); };
+    };
+    const state = { cit: false, nid: false };
+    // citizenship is complete when every required side is in (2/2); NID when at least one photo is in
+    const check = async () => {
+      if (await selectTarget(/national eid/i)) state.nid = (scanStatus() || {}).done > 0;
+      if (await selectTarget(/citizenship/i)) { const st = scanStatus() || {}; state.cit = st.done >= st.max; }
+    };
+    toast('⏳ Adding your documents… / कागजात थप्दै…');
+    await check();                                         // already uploaded earlier?
+    if (!state.cit) { const imgs = loadPhotos('citizenship'); if (imgs && await uploadPhotos(/citizenship/i, imgs, 'citizenship')) GM_deleteValue('photos_citizenship'); }
+    if (!state.nid) { const imgs = loadPhotos('nid'); if (imgs && await uploadPhotos(/national eid/i, imgs, 'nid')) GM_deleteValue('photos_nid'); }
+    await check();
+    render(state.cit, state.nid);
+    say(state.cit && state.nid ? 'कागजातहरू अपलोड भए। जाँचेर Next थिच्नुहोस्।' : 'बाँकी कागजातको फोटो थप्नुहोस्।');
+    docsBusy = false;
+  }
+  setInterval(() => { if (location.pathname.toLowerCase().startsWith('/application/integrated-enrollment')) onDocsStep(); }, 1000);
 
   // ---------- AFTER SIGN-IN: go straight to "Apply for a document" ----------
   // Only right after the login page (within 2 minutes), so normal visits to Home are left alone.
