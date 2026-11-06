@@ -1,10 +1,13 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    roughdev
-// @version      6.1
-// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, printable slip. Captcha + Register stay manual.
-// @match        https://online.nepalpassport.gov.np/account/register*
+// @version      7.0
+// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, printable slip. Captcha + Register stay manual.
+// @match        https://online.nepalpassport.gov.np/*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
 // @connect      nepal-gov-autofill.tamang-subash36.workers.dev
 // @updateURL    https://raw.githubusercontent.com/Moktan-26/nepal-gov-autofill/main/nepal-gov-autofill.user.js
 // @downloadURL  https://raw.githubusercontent.com/Moktan-26/nepal-gov-autofill/main/nepal-gov-autofill.user.js
@@ -149,8 +152,12 @@
       ok: v => /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(v), bad: 'Check the email (example: name@gmail.com)' },
   ];
 
-  // ---------- UI ----------
+  // ---------- REGISTER PAGE UI ----------
+  let regBox = null;
+  function buildRegister() {
   const box = document.createElement('div');
+  box.id = 'k-reg-panel';
+  regBox = box;
   box.style.cssText = 'position:fixed;top:70px;right:16px;z-index:99999;background:#fff;border:3px solid #c8102e;border-radius:12px;padding:14px;width:310px;max-height:85vh;overflow:auto;font:15px sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.25)';
   box.innerHTML = `
     <b style="color:#c8102e;font-size:17px">🪪 Nepal Gov Autofill</b>
@@ -214,7 +221,19 @@
     mark(f.k, !v ? 'need' : f.ok(v) ? 'ok' : 'bad');
     $('#k-' + f.k + '-err').textContent = v && !f.ok(v) ? f.bad : '';
   }));
-  FIELDS.forEach(f => input(f.k).addEventListener('keydown', e => { if (e.key === 'Enter') $('#k-next').click(); }));
+  // Move on by itself: when a field becomes valid and the user stops typing, go to the next step
+  let advanceTimer = null;
+  const advance = async () => { if (await guide()) review(); };
+  FIELDS.forEach(f => {
+    input(f.k).addEventListener('input', () => {
+      clearTimeout(advanceTimer);
+      const v = val(f.k);
+      if (!v || !f.ok(v)) return;
+      const wait = f.k === 'phone' || f.k === 'nin' ? 300 : 1500;   // numbers are complete when valid; text needs a pause
+      advanceTimer = setTimeout(() => { if (f.ok(val(f.k))) advance(); }, wait);
+    });
+    input(f.k).addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(advanceTimer); advance(); } });
+  });
 
   // ---------- STEP 1: scan ----------
   getVoice();
@@ -236,7 +255,7 @@
   };
 
   // ---------- STEP 2: fill missing fields one by one ----------
-  $('#k-next').onclick = async () => { if (await guide()) review(); };
+  $('#k-next').onclick = () => { clearTimeout(advanceTimer); advance(); };
 
   // ---------- STEP 3: confirmation 1 — review everything before filling ----------
   function review() {
@@ -280,6 +299,7 @@
       '#entityId': d.nin, '#email': d.email, '#phone': '+977' + d.phone };
     const missed = Object.entries(want).filter(([q, v]) => (document.querySelector(q)?.value || '').trim() !== v);
 
+    GM_setValue('pendingLogin', { email: d.email, pass: d.pass, t: Date.now() });   // for the login page; auto-deleted
     const sent = await sendSMS(d.phone, `Passport portal login. Username: ${d.email} Password: ${d.pass}`);
     $('#k-review').innerHTML = `<div style="margin-top:8px;padding:10px;border:2px dashed #1a7f37;border-radius:8px">
         <div style="font-size:13px">Password / पासवर्ड:</div>
@@ -300,4 +320,63 @@
       if (cap) { cap.scrollIntoView({ block: 'center' }); cap.focus(); }
     };
   }
+  }
+
+  // ---------- LOGIN PAGE: fill email + password by itself ----------
+  const PENDING_MS = 30 * 60 * 1000;          // remember the new login for 30 minutes at most
+  function pendingLogin() {
+    const p = GM_getValue('pendingLogin', null);
+    if (p && Date.now() - p.t < PENDING_MS) return p;
+    if (p) GM_deleteValue('pendingLogin');
+    return null;
+  }
+  const waitFor = (q, ms = 10000) => new Promise(res => {
+    const t0 = Date.now();
+    (function poll() {
+      const el = document.querySelector(q);
+      if (el) return res(el);
+      if (Date.now() - t0 > ms) return res(null);
+      setTimeout(poll, 250);
+    })();
+  });
+
+  let loginBox = null, filledLogin = false;
+  async function fillLogin() {
+    const p = pendingLogin();
+    const user = await waitFor('#username');
+    if (!user || !location.pathname.toLowerCase().startsWith('/account/login')) return;
+    loginBox = document.createElement('div');
+    loginBox.style.cssText = 'position:fixed;top:70px;right:16px;z-index:99999;background:#fff;border:3px solid #c8102e;border-radius:12px;padding:14px;width:300px;font:16px sans-serif;font-weight:bold;box-shadow:0 4px 18px rgba(0,0,0,.25)';
+    document.body.appendChild(loginBox);
+    if (!p) {
+      loginBox.innerHTML = '🪪 Nepal Gov Autofill<div style="margin-top:8px;font-weight:normal;font-size:14px">Type the email and password from your slip, then the captcha. / स्लिपको इमेल र पासवर्ड लेख्नुहोस्।</div>';
+      return;
+    }
+    setVal('#username', p.email);
+    setVal('[name="password"]', p.pass);
+    filledLogin = true;
+    const cap = document.querySelector('#captcha');
+    if (cap) { cap.scrollIntoView({ block: 'center' }); cap.focus(); }
+    loginBox.innerHTML = '🪪 Nepal Gov Autofill<div style="margin-top:8px;padding:10px;border-radius:8px;background:#e6f4ea">✔ Email & password filled.<br>👉 Type the captcha and click Sign in<br>अब क्याप्चा लेखेर Sign in थिच्नुहोस्</div>';
+    say('इमेल र पासवर्ड भरियो। अब क्याप्चा लेखेर साइन इन थिच्नुहोस्।');
+  }
+
+  // ---------- ROUTER: the site changes pages without reloading, so watch the address ----------
+  let currentPath = '';
+  function route() {
+    const path = location.pathname.toLowerCase();
+    if (path === currentPath) return;
+    const prev = currentPath; currentPath = path;
+    if (loginBox) { loginBox.remove(); loginBox = null; }
+    if (regBox) regBox.style.display = path.startsWith('/account/register') ? 'block' : 'none';
+    // left the login page after we filled it -> logged in (or gave up): forget the password
+    if (prev.startsWith('/account/login') && !path.startsWith('/account/login') && filledLogin) {
+      GM_deleteValue('pendingLogin'); filledLogin = false;
+    }
+    if (path.startsWith('/account/register') && !regBox) waitFor('#entityName').then(el => el && !regBox && buildRegister());
+    if (path.startsWith('/account/login')) fillLogin();
+  }
+  pendingLogin();                             // drop anything older than 30 minutes
+  route();
+  setInterval(route, 500);
 })();
