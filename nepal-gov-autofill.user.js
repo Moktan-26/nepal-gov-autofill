@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    https://github.com/Moktan-26/nepal-gov-autofill
-// @version      8.7
-// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, opens Apply for a document after sign-in, picks New + 34 pages + Kathmandu office, fills phone + email from the account, auto Next after choosing a time slot, citizenship certificate scan on the Demographic step, auto-uploads NID + citizenship on Supporting documents, printable slip. Captcha + Register stay manual.
+// @version      8.8
+// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, opens Apply for a document after sign-in, picks New + 34 pages + Kathmandu office, fills phone + email from the account, auto Next after choosing a time slot, citizenship certificate scan on the Demographic step, auto-uploads NID + citizenship on Supporting documents, auto Next on completed steps, printable slip. Captcha + Register stay manual.
 // @match        https://online.nepalpassport.gov.np/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -713,6 +713,47 @@
     docsBusy = false;
   }
   setInterval(() => { if (location.pathname.toLowerCase().startsWith('/application/integrated-enrollment')) onDocsStep(); }, 1000);
+
+  // ---------- AUTO NEXT: move on when every required box on a step is filled ----------
+  // Never on a page with a captcha (appointment booking, final Apply) and never presses Apply.
+  let lastTyping = 0;
+  document.addEventListener('input', e => { if (e.isTrusted) lastTyping = Date.now(); }, true);
+  document.addEventListener('keydown', e => { if (e.isTrusted) lastTyping = Date.now(); }, true);
+  const stepKey = () => txt(document.querySelector('.p-steps-current') || document.body).slice(0, 30) + '|' +
+    [...document.querySelectorAll('.p-breadcrumb .p-menuitem-link, .p-menuitem-link-active')].map(txt).join('>') + '|' +
+    [...document.querySelectorAll('h1,h2,h3,h4,h5,legend')].filter(visible).map(txt).join('|');
+  function requiredFilled() {
+    const labels = [...document.querySelectorAll('label')].filter(l => visible(l) && /\*\s*$/.test(txt(l)));
+    if (!labels.length) return false;
+    for (const l of labels) {
+      let box = null;
+      for (let p = l.parentElement, i = 0; p && i < 4 && !box; p = p.parentElement, i++) box = p.querySelector('.p-dropdown, input:not([type=hidden]), textarea');
+      if (!box) return false;
+      if (box.classList.contains('p-dropdown')) { const v = box.querySelector('.p-dropdown-label:not(.p-placeholder)'); if (!v || !txt(v)) return false; }
+      else if (box.type === 'radio' || box.type === 'checkbox') { const name = box.name; if (name && ![...document.querySelectorAll('input[name="' + name + '"]')].some(r => r.checked)) return false; }
+      else if (!box.value.replace(/[_\s]/g, '').replace(/^\+977$/, '')) return false;
+    }
+    return true;
+  }
+  const stepsAdvanced = new Set();
+  setInterval(() => {
+    if (!location.pathname.toLowerCase().startsWith('/application/integrated-enrollment')) return;
+    if (document.querySelector('#captcha') && visible(document.querySelector('#captcha'))) return;   // booking / final page: user decides
+    if (document.querySelector('.p-dialog') && visible(document.querySelector('.p-dialog'))) return;
+    if (Date.now() - lastTyping < 2000 || docsBusy || contactBusy) return;
+    const key = stepKey();
+    if (stepsAdvanced.has(key)) return;
+    const next = byText('button', /^next$/i);
+    if (!next || next.disabled || next.classList.contains('p-disabled')) return;
+    if ([...document.querySelectorAll('.ng-invalid.ng-dirty, .ng-invalid.ng-touched, .p-invalid')].some(visible)) return;
+    // Proxy details are only for minors: skip when nobody typed a proxy
+    if (/only for minors/i.test(txt(document.body)) && ![...document.querySelectorAll('input:not([type=hidden])')].some(i => visible(i) && i.value.trim())) { stepsAdvanced.add(key); next.click(); return; }
+    const docs = scanStatus();
+    if (docs) { if (!document.querySelector('.option-icon.icon-red') ) { stepsAdvanced.add(key); next.click(); } return; }   // documents: all required scans in
+    if (!requiredFilled()) return;
+    stepsAdvanced.add(key);
+    next.click();
+  }, 1000);
 
   // ---------- AFTER SIGN-IN: go straight to "Apply for a document" ----------
   // Only right after the login page (within 2 minutes), so normal visits to Home are left alone.
