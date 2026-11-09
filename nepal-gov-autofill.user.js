@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    https://github.com/Moktan-26/nepal-gov-autofill
-// @version      8.8
-// @description  Scan NID front with AI (via Nepal Gov Autofill server) -> auto-fill name/DOB/NIN, guided step-by-step with Nepali voice prompts, double confirmation, auto password, auto-filled login, opens Apply for a document after sign-in, picks New + 34 pages + Kathmandu office, fills phone + email from the account, auto Next after choosing a time slot, citizenship certificate scan on the Demographic step, auto-uploads NID + citizenship on Supporting documents, auto Next on completed steps, printable slip. Captcha + Register stay manual.
+// @version      9.0
+// @description  Shop kiosk for the Nepal passport portal: the customer's documents (NID, citizenship, temporary residence, optional academic and marriage/divorce) are added and read once at the start, then every step is filled from them (register, citizenship, address, phone + email), documents are uploaded on Supporting documents, Next is pressed on completed steps, and each submitted application is counted for the shop. Nepali voice prompts. Captcha, Register and Apply stay manual.
 // @match        https://online.nepalpassport.gov.np/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -93,9 +93,8 @@
   async function readCard(file) {
     msg('Preparing photo…');
     const b64 = await toJpegBase64(file);
-    savePhotos('nid', [b64]);                // kept briefly for the Supporting documents step
     msg('Reading card…');
-    const d = await post(CONFIG.scanServer, { image: b64 });
+    const d = await post(CONFIG.scanServer, { image: b64, shop: GM_getValue('shopCode', '') });
     // sanity checks so a bad read never slips through
     const out = {
       given: String(d.given || '').trim(),
@@ -163,18 +162,18 @@
   ];
 
   // ---------- REGISTER PAGE UI ----------
-  let regBox = null;
+  let regBox = null, regApi = null;
   function buildRegister() {
   const box = document.createElement('div');
-  box.id = 'k-reg-panel';
+  box.id = 'k-reg-panel'; box.className = 'k-panel';
   regBox = box;
   box.style.cssText = 'position:fixed;top:70px;right:16px;z-index:99999;background:#fff;border:3px solid #c8102e;border-radius:12px;padding:14px;width:310px;max-height:85vh;overflow:auto;font:15px sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.25)';
   box.innerHTML = `
     <b style="color:#c8102e;font-size:17px">🪪 Nepal Gov Autofill</b>
     <div id="k-ask" title="Tap to hear again" style="margin-top:8px;padding:10px;border-radius:8px;background:#fff4e5;font-size:16px;font-weight:bold;cursor:pointer"></div>
     <div style="font-size:11px;color:#888;margin-top:2px">🔊 Tap the instruction to hear it again / फेरि सुन्न थिच्नुहोस्</div>
-    <label id="k-scan" style="display:block;margin-top:8px;padding:14px;background:#c8102e;color:#fff;text-align:center;border-radius:8px;cursor:pointer;font-size:17px">
-      📷 NID कार्ड स्क्यान / Scan NID<input id="k-img" type="file" accept="image/*" capture="environment" hidden></label>
+    <button id="k-scan" style="display:block;width:100%;margin-top:8px;padding:14px;background:#c8102e;color:#fff;text-align:center;border:0;border-radius:8px;cursor:pointer;font-size:17px">
+      🗂 Customer documents / कागजात</button>
     <div id="k-fields" style="margin-top:6px"></div>
     <button id="k-next" style="width:100%;margin-top:10px;padding:12px;font-size:16px;border-radius:8px;border:0;background:#1a7f37;color:#fff">अर्को / Next ➜</button>
     <div id="k-review" style="display:none"></div>
@@ -245,24 +244,24 @@
     input(f.k).addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(advanceTimer); advance(); } });
   });
 
-  // ---------- STEP 1: scan ----------
+  // ---------- STEP 1: customer documents (scanned once in the intake panel) ----------
   getVoice();
-  ask('👉 Scan the front of your NID card / राष्ट्रिय परिचयपत्रको अगाडिको फोटो खिच्नुहोस्');
-  setTimeout(() => say('नमस्ते। कृपया आफ्नो राष्ट्रिय परिचयपत्रको अगाडिको फोटो खिच्नुहोस्।'), 800);
-
-  $('#k-img').onchange = async e => {
-    const file = e.target.files[0]; if (!file) return;
-    e.target.value = '';
-    ask('⏳ Reading card… / कार्ड पढ्दै…');
-    try {
-      const d = await readCard(file);
-      ['given', 'surname', 'dob', 'nin'].forEach(k => { if (d[k]) input(k).value = d[k]; });
-      const got = ['given', 'surname', 'dob', 'nin'].filter(k => d[k]).length;
-      msg(got === 4 ? '✔ Card read. Check each field against the card.' : `Read ${got} of 4 details from the card.`);
-      if (got === 0) { ask('⚠ Could not read the card. Retake the photo (flat, good light) or type the details. / फेरि फोटो खिच्नुहोस्', '#ffe5e5'); say('कार्ड पढ्न सकिएन। फेरि फोटो खिच्नुहोस्।'); return; }
-      await guide();
-    } catch (err) { ask('❌ ' + err.message, '#ffe5e5'); }
+  $('#k-scan').onclick = () => openIntake();
+  regApi = {
+    fill(d) {
+      ['given', 'surname', 'dob', 'nin'].forEach(k => { if (d[k] && !val(k)) input(k).value = d[k]; });
+      const got = ['given', 'surname', 'dob', 'nin'].filter(k => val(k)).length;
+      msg(got === 4 ? '✔ Details from the NID. Check them against the card.' : `Read ${got} of 4 details from the NID.`);
+      guide();
+    },
   };
+  const c0 = getCustomer();
+  if (c0 && c0.data.nid && c0.data.nid.given) regApi.fill(c0.data.nid);
+  else {
+    ask('👉 Add the customer\'s documents first / पहिले ग्राहकका कागजात थप्नुहोस्');
+    setTimeout(() => say('नमस्ते। पहिले ग्राहकका कागजातको फोटो थप्नुहोस्।'), 800);
+    openIntake();
+  }
 
   // ---------- STEP 2: fill missing fields one by one ----------
   $('#k-next').onclick = () => { clearTimeout(advanceTimer); advance(); };
@@ -355,7 +354,7 @@
     const p = pendingLogin();
     const user = await waitFor('#username');
     if (!user || !location.pathname.toLowerCase().startsWith('/account/login')) return;
-    loginBox = document.createElement('div');
+    loginBox = document.createElement('div'); loginBox.className = 'k-panel';
     loginBox.style.cssText = 'position:fixed;top:70px;right:16px;z-index:99999;background:#fff;border:3px solid #c8102e;border-radius:12px;padding:14px;width:300px;font:16px sans-serif;font-weight:bold;box-shadow:0 4px 18px rgba(0,0,0,.25)';
     document.body.appendChild(loginBox);
     if (!p) {
@@ -402,7 +401,7 @@
   let toastEl = null;
   function toast(html, color = '#e6f4ea') {
     if (!toastEl) {
-      toastEl = document.createElement('div');
+      toastEl = document.createElement('div'); toastEl.className = 'k-panel';
       toastEl.style.cssText = 'position:fixed;top:70px;right:16px;z-index:99999;background:#fff;border:3px solid #c8102e;border-radius:12px;padding:14px;width:300px;font:15px sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.25)';
       document.body.appendChild(toastEl);
     }
@@ -567,16 +566,16 @@
     el.dispatchEvent(new Event('change', { bubbles: true })); el.dispatchEvent(new Event('blur', { bubbles: true }));
   }
   // choose a district in a dropdown even if the spelling differs a little (Kavre / Kavrepalanchok)
-  async function pickDistrict(dd, name) {
+  async function pickDistrict(dd, name, nrm = norm) {
     if (!dd || !name) return false;
-    const want = norm(name);
+    const want = nrm(name);
     const cur = dd.querySelector('.p-dropdown-label:not(.p-placeholder)'); if (cur && txt(cur)) return true;   // already chosen
     for (let tries = 0; tries < 10; tries++) {
       (dd.querySelector('.p-dropdown-trigger') || dd).click();
       await sleep(600);
       const opts = [...document.querySelectorAll('.p-dropdown-panel li[role=option], .p-dropdown-items li')];
       if (opts.length > 1) {
-        const n = li => norm(txt(li).split('/')[0]);
+        const n = li => nrm(txt(li).split('/')[0]);
         const hit = opts.find(li => n(li) === want)
           || opts.find(li => n(li).startsWith(want.slice(0, 5)) || want.startsWith(n(li).slice(0, 5)));
         if (hit) { hit.click(); await sleep(600); return true; }
@@ -589,53 +588,59 @@
     return false;
   }
 
-  const citShown = new WeakSet();
-  function offerCitizenshipScan() {
+  // Citizenship details come from the customer documents read at the start
+  const citDone = new WeakSet();
+  let citBusy = false;
+  async function fillCitizenship() {
     const cit = document.querySelector('#minorID');
-    if (!cit || !visible(cit) || citShown.has(cit) || cit.value.trim()) return;
-    citShown.add(cit);
-    toast(`👉 Scan the citizenship certificate (front, and back if needed)<br>नागरिकताको प्रमाणपत्रको फोटो खिच्नुहोस्
-      <label style="display:block;margin-top:10px;padding:12px;background:#c8102e;color:#fff;text-align:center;border-radius:8px;cursor:pointer">
-      📷 Scan citizenship / नागरिकता स्क्यान<input id="k-cit" type="file" accept="image/*" multiple hidden></label>
-      <div id="k-cit-msg" style="margin-top:6px;font-weight:normal;font-size:13px"></div>`, '#fff4e5');
-    say('अब नागरिकताको प्रमाणपत्रको फोटो खिच्नुहोस्।');
-    const input = toastEl.querySelector('#k-cit'), note = t => { const m = toastEl && toastEl.querySelector('#k-cit-msg'); if (m) m.innerHTML = t; };
-    input.onchange = async () => {
-      const files = [...input.files].slice(0, 2);
-      if (!files.length) return;
-      note('⏳ Reading certificate… / पढ्दै…');
-      try {
-        const images = [];
-        for (const f of files) images.push(await toJpegBase64(f));
-        savePhotos('citizenship', images);     // kept briefly for the Supporting documents step
-        const d = await post(CONFIG.scanServer, { kind: 'citizenship', images });
-        const done = [], missing = [];
-        const box = document.querySelector('#minorID');
-        if (d.citizenshipNo && box && !box.value.trim()) { typeInto(box, d.citizenshipNo); done.push('Citizenship no.'); } else if (!d.citizenshipNo) missing.push('Citizenship no.');
-        const birthDD = [...document.querySelectorAll('.p-dropdown')].find(x => /place of birth/i.test(labelOf(x)));
-        if (await pickDistrict(birthDD, d.birthDistrict)) done.push('Place of birth'); else missing.push('Place of birth');
-        if (await pickDistrict(document.querySelector('#minorIDPlaceOfIssue'), d.issueDistrict)) done.push('Place of issue'); else missing.push('Place of issue');
-        const date = document.querySelector('#minorIDDateOfIssue');
-        if (d.issueDateBS && date && !date.value.replace(/[_\-\s]/g, '')) { typeInto(date, d.issueDateBS); done.push('Date of issue'); } else if (!d.issueDateBS) missing.push('Date of issue');
-        note((done.length ? '✔ Filled: ' + done.join(', ') : '') + (missing.length ? '<br>⚠ Please fill yourself: ' + missing.join(', ') : '') + '<br>👉 Check them against the certificate / प्रमाणपत्रसँग मिलाउनुहोस्');
-        say(missing.length ? 'केही विवरण भरियो। बाँकी आफैं भर्नुहोस्।' : 'नागरिकताको विवरण भरियो। प्रमाणपत्रसँग मिलाएर जाँच्नुहोस्।');
-      } catch (err) { note('❌ ' + err.message); }
-      input.value = '';
-    };
+    if (citBusy || intakeOpen() || !cit || !visible(cit) || citDone.has(cit) || cit.value.trim()) return;
+    const c = getCustomer(), d = c && c.data.citizenship;
+    citDone.add(cit);
+    if (!d || !d.citizenshipNo) {
+      toast('👉 Citizenship details are not read yet / नागरिकताको विवरण छैन<button id="k-open-intake" style="display:block;width:100%;margin-top:10px;padding:12px;background:#c8102e;color:#fff;border:0;border-radius:8px;cursor:pointer">🗂 Customer documents</button>', '#fff4e5');
+      toastEl.querySelector('#k-open-intake').onclick = () => { citDone.delete(cit); openIntake(); };
+      return;
+    }
+    citBusy = true;
+    const done = [], missing = [];
+    typeInto(cit, d.citizenshipNo); done.push('Citizenship no.');
+    const birthDD = [...document.querySelectorAll('.p-dropdown')].find(x => /place of birth/i.test(labelOf(x)));
+    if (await pickDistrict(birthDD, d.birthDistrict)) done.push('Place of birth'); else missing.push('Place of birth');
+    if (await pickDistrict(document.querySelector('#minorIDPlaceOfIssue'), d.issueDistrict)) done.push('Place of issue'); else missing.push('Place of issue');
+    const date = document.querySelector('#minorIDDateOfIssue');
+    if (d.issueDateBS && date && !date.value.replace(/[_\-\s]/g, '')) { typeInto(date, d.issueDateBS); done.push('Date of issue'); } else if (!d.issueDateBS) missing.push('Date of issue');
+    toast('✔ Filled from citizenship: ' + done.join(', ') + (missing.length ? '<br>⚠ Please fill: ' + missing.join(', ') : ''), missing.length ? '#fff4e5' : '#e6f4ea');
+    citBusy = false;
   }
-  setInterval(() => { if (location.pathname.toLowerCase().startsWith('/application/integrated-enrollment')) offerCitizenshipScan(); }, 1000);
+  setInterval(() => { if (location.pathname.toLowerCase().startsWith('/application/integrated-enrollment')) fillCitizenship(); }, 1000);
 
-  // ---------- SUPPORTING DOCUMENTS: upload the NID + citizenship photos by themselves ----------
-  // Photos from the earlier scans are kept on this device only, for 3 hours at most,
-  // and deleted as soon as they are uploaded.
-  const PHOTO_MS = 3 * 60 * 60 * 1000;
-  function savePhotos(kind, imgs) { try { GM_setValue('photos_' + kind, { imgs, t: Date.now() }); } catch (e) { /* too big for storage: skip */ } }
-  function loadPhotos(kind) {
-    const p = GM_getValue('photos_' + kind, null);
-    if (p && Date.now() - p.t < PHOTO_MS && p.imgs && p.imgs.length) return p.imgs;
-    if (p) GM_deleteValue('photos_' + kind);
-    return null;
+  // Residential address: from the temporary residence document, otherwise the permanent address on the NID back
+  const muniNorm = t => norm(String(t || '').replace(/upa ?maha ?nagarpalika|maha ?nagarpalika|nagarpalika|gaun ?palika|gau ?palika|(sub-?)?metropolitan( city)?|rural municipality|municipality/gi, ''));
+  const addrDone = new WeakSet();
+  let addrBusy = false;
+  async function fillAddress() {
+    const prov = document.querySelector('#addressProvince');
+    if (addrBusy || intakeOpen() || !prov || !visible(prov) || addrDone.has(prov)) return;
+    const c = getCustomer();
+    const res = c && c.data.residence && c.data.residence.address;
+    const a = res && res.district ? res : (c && c.data.nid && c.data.nid.permanentAddress);
+    if (!a || !a.district) return;
+    addrDone.add(prov); addrBusy = true;
+    const done = [], missing = [];
+    if (await pickDistrict(prov, a.province)) done.push('Province'); else missing.push('Province');
+    if (await pickDistrict(document.querySelector('#addressDistrict'), a.district)) done.push('District'); else missing.push('District');
+    if (await pickDistrict(document.querySelector('#addressMunicipality'), a.municipality, muniNorm)) done.push('Municipality'); else missing.push('Municipality');
+    const put = (id, v, name) => { const el = document.querySelector('#' + id); if (!el) return; if (el.value.trim()) return done.push(name); if (v) { typeInto(el, v); done.push(name); } else missing.push(name); };
+    put('addressWard', a.ward, 'Ward');
+    put('addressStreet', a.tole, 'Street');
+    const hn = document.querySelector('#addressHouseNumber'); if (hn && !hn.value.trim() && a.houseNumber) typeInto(hn, a.houseNumber);
+    toast('✔ Address filled from ' + (a === res ? 'the temporary residence document' : 'the NID (permanent address)') + (missing.length ? '<br>⚠ Please fill: ' + missing.join(', ') : ''), missing.length ? '#fff4e5' : '#e6f4ea');
+    addrBusy = false;
   }
+  setInterval(() => { if (location.pathname.toLowerCase().startsWith('/application/integrated-enrollment')) fillAddress(); }, 1000);
+
+  // ---------- SUPPORTING DOCUMENTS: upload the customer's document photos by themselves ----------
+  const siteFileInput = () => [...document.querySelectorAll('input[type=file]')].find(i => !i.closest('.k-panel'));
   // make a base64 JPEG fit under the site's 1 MB limit
   async function b64ToFile(b64, name) {
     let blob = await (await fetch('data:image/jpeg;base64,' + b64)).blob();
@@ -668,7 +673,7 @@
     for (let i = 0; i < imgs.length; i++) {
       const st = scanStatus();
       if (!st || st.done >= st.max) break;
-      const input = document.querySelector('input[type=file]');
+      const input = siteFileInput();
       if (!input) break;
       const dt = new DataTransfer(); dt.items.add(await b64ToFile(imgs[i], label + '-' + (i + 1) + '.jpg'));
       input.files = dt.files;
@@ -681,35 +686,35 @@
 
   const docsSeen = new WeakSet();
   let docsBusy = false;
+  // site upload target -> customer document slots
+  const DOC_TARGETS = [
+    { re: /citizenship/i, name: 'Citizenship certificate (both sides)', slots: ['cit_front', 'cit_back'], required: true, full: true },
+    { re: /national eid/i, name: 'National eID', slots: ['nid_front', 'nid_back'], required: true },
+    { re: /academic/i, name: 'Academic certificate', slots: ['academic'] },
+    { re: /marriage|divorce/i, name: 'Marriage/Divorce document', slots: ['marriage'] },
+  ];
   async function onDocsStep() {
-    const input = document.querySelector('input[type=file]');
-    if (docsBusy || !input || docsSeen.has(input) || !scanStatus()) return;
+    const input = siteFileInput();
+    if (docsBusy || intakeOpen() || !input || docsSeen.has(input) || !scanStatus()) return;
     docsSeen.add(input); docsBusy = true;
-    const line = (ok, t) => (ok ? '✔ ' : '👉 ') + t;
-    const render = (cit, nid) => {
-      const cs = (scanStatus() && /citizenship/i.test(scanStatus().target)) ? ' (' + scanStatus().done + '/' + scanStatus().max + ')' : '';
-      toast(`${line(cit, 'Citizenship certificate (both sides)' + (cit ? ' uploaded' : cs))}<br>${line(nid, 'National eID' + (nid ? ' uploaded' : ''))}
-        ${cit ? '' : '<label style="display:block;margin-top:8px;padding:10px;background:#c8102e;color:#fff;text-align:center;border-radius:8px;cursor:pointer">📷 Add citizenship (front + back)<input id="k-up-cit" type="file" accept="image/*" multiple hidden></label>'}
-        ${nid ? '' : '<label style="display:block;margin-top:8px;padding:10px;background:#c8102e;color:#fff;text-align:center;border-radius:8px;cursor:pointer">📷 Add National eID photo<input id="k-up-nid" type="file" accept="image/*" hidden></label>'}
-        <div id="k-up-msg" style="margin-top:6px;font-weight:normal;font-size:13px"></div>`, cit && nid ? '#e6f4ea' : '#fff4e5');
-      const note = t => { const m = toastEl && toastEl.querySelector('#k-up-msg'); if (m) m.textContent = t; };
-      const ci = toastEl.querySelector('#k-up-cit'), ni = toastEl.querySelector('#k-up-nid');
-      if (ci) ci.onchange = async () => { note('⏳ Uploading…'); const ok = await uploadPhotos(/citizenship/i, await pickToB64(ci), 'citizenship') > 0; await check(); render(state.cit, state.nid); if (!ok) note('⚠ Could not upload — use the site\'s Add button'); else if (!state.cit) note('👉 Add the other side too / अर्को पाटो पनि थप्नुहोस्'); };
-      if (ni) ni.onchange = async () => { note('⏳ Uploading…'); const ok = await uploadPhotos(/national eid/i, await pickToB64(ni), 'nid') > 0; await check(); render(state.cit, state.nid); if (!ok) note('⚠ Could not upload — use the site\'s Add button'); };
-    };
-    const state = { cit: false, nid: false };
-    // citizenship is complete when every required side is in (2/2); NID when at least one photo is in
-    const check = async () => {
-      if (await selectTarget(/national eid/i)) state.nid = (scanStatus() || {}).done > 0;
-      if (await selectTarget(/citizenship/i)) { const st = scanStatus() || {}; state.cit = st.done >= st.max; }
-    };
-    toast('⏳ Adding your documents… / कागजात थप्दै…');
-    await check();                                         // already uploaded earlier?
-    if (!state.cit) { const imgs = loadPhotos('citizenship'); if (imgs && await uploadPhotos(/citizenship/i, imgs, 'citizenship')) GM_deleteValue('photos_citizenship'); }
-    if (!state.nid) { const imgs = loadPhotos('nid'); if (imgs && await uploadPhotos(/national eid/i, imgs, 'nid')) GM_deleteValue('photos_nid'); }
-    await check();
-    render(state.cit, state.nid);
-    say(state.cit && state.nid ? 'कागजातहरू अपलोड भए। जाँचेर Next थिच्नुहोस्।' : 'बाँकी कागजातको फोटो थप्नुहोस्।');
+    toast('⏳ Adding the customer\'s documents… / कागजात थप्दै…');
+    const lines = [];
+    let missingRequired = false;
+    for (const t of DOC_TARGETS) {
+      if (![...document.querySelectorAll('li.p-listbox-item')].some(l => t.re.test(txt(l)))) continue;   // not asked for this application
+      const imgs = t.slots.flatMap(k => getDocs(k));
+      await selectTarget(t.re);
+      let st = scanStatus() || { done: 0, max: 0 };
+      if (imgs.length && st.done === 0) { await uploadPhotos(t.re, imgs, t.slots[0]); await selectTarget(t.re); st = scanStatus() || st; }
+      const ok = t.full ? st.done >= st.max : st.done > 0;
+      if (t.required && !ok) missingRequired = true;
+      lines.push((ok ? '✔ ' : t.required ? '👉 ' : '· ') + t.name + ' ' + st.done + '/' + st.max + (ok ? '' : t.required ? ' — add in Customer documents' : ' (optional)'));
+    }
+    await selectTarget(/citizenship/i);
+    toast(lines.join('<br>') + (missingRequired ? '<button id="k-open-intake" style="display:block;width:100%;margin-top:10px;padding:12px;background:#c8102e;color:#fff;border:0;border-radius:8px;cursor:pointer">🗂 Customer documents</button>' : ''), missingRequired ? '#fff4e5' : '#e6f4ea');
+    const b = toastEl && toastEl.querySelector('#k-open-intake');
+    if (b) b.onclick = () => { docsSeen.delete(input); openIntake(); };
+    say(missingRequired ? 'बाँकी कागजातको फोटो थप्नुहोस्।' : 'कागजातहरू अपलोड भए।');
     docsBusy = false;
   }
   setInterval(() => { if (location.pathname.toLowerCase().startsWith('/application/integrated-enrollment')) onDocsStep(); }, 1000);
@@ -723,7 +728,7 @@
     [...document.querySelectorAll('.p-breadcrumb .p-menuitem-link, .p-menuitem-link-active')].map(txt).join('>') + '|' +
     [...document.querySelectorAll('h1,h2,h3,h4,h5,legend')].filter(visible).map(txt).join('|');
   function requiredFilled() {
-    const labels = [...document.querySelectorAll('label')].filter(l => visible(l) && /\*\s*$/.test(txt(l)));
+    const labels = [...document.querySelectorAll('label')].filter(l => visible(l) && !l.closest('.k-panel') && /\*\s*$/.test(txt(l)));
     if (!labels.length) return false;
     for (const l of labels) {
       let box = null;
@@ -740,6 +745,8 @@
     if (!location.pathname.toLowerCase().startsWith('/application/integrated-enrollment')) return;
     if (document.querySelector('#captcha') && visible(document.querySelector('#captcha'))) return;   // booking / final page: user decides
     if (document.querySelector('.p-dialog') && visible(document.querySelector('.p-dialog'))) return;
+    if (intakeOpen()) return;                                                                       // shop is adding documents
+    if (addrBusy || citBusy) return;
     if (Date.now() - lastTyping < 2000 || docsBusy || contactBusy) return;
     const key = stepKey();
     if (stepsAdvanced.has(key)) return;
@@ -747,13 +754,234 @@
     if (!next || next.disabled || next.classList.contains('p-disabled')) return;
     if ([...document.querySelectorAll('.ng-invalid.ng-dirty, .ng-invalid.ng-touched, .p-invalid')].some(visible)) return;
     // Proxy details are only for minors: skip when nobody typed a proxy
-    if (/only for minors/i.test(txt(document.body)) && ![...document.querySelectorAll('input:not([type=hidden])')].some(i => visible(i) && i.value.trim())) { stepsAdvanced.add(key); next.click(); return; }
+    if (/only for minors/i.test(txt(document.body)) && ![...document.querySelectorAll('input:not([type=hidden])')].some(i => visible(i) && !i.closest('.k-panel') && i.value.trim())) { stepsAdvanced.add(key); next.click(); return; }
     const docs = scanStatus();
     if (docs) { if (!document.querySelector('.option-icon.icon-red') ) { stepsAdvanced.add(key); next.click(); } return; }   // documents: all required scans in
     if (!requiredFilled()) return;
     stepsAdvanced.add(key);
     next.click();
   }, 1000);
+
+  // ---------- CUSTOMER DOCUMENTS: scanned once at the start, used by every step ----------
+  // Kept on this device only, for one customer at a time: cleared by "New customer", after Apply, or after 24 hours.
+  const CUST_MS = 24 * 60 * 60 * 1000;
+  const SLOTS = [
+    { cat: 'nid', title: 'National ID (NID) / राष्ट्रिय परिचयपत्र', items: [{ k: 'nid_front', label: 'Front', max: 1 }, { k: 'nid_back', label: 'Back', max: 1 }], need: true },
+    { cat: 'citizenship', title: 'Citizenship / नागरिकता', items: [{ k: 'cit_front', label: 'Front', max: 1 }, { k: 'cit_back', label: 'Back', max: 1 }], need: true },
+    { cat: 'residence', title: 'Temporary residence / अस्थायी बसोबास', items: [{ k: 'residence', label: 'Document', max: 2 }], hint: 'For the residential address. Without it, the NID permanent address is used.' },
+    { cat: 'academic', title: 'Academic certificate (optional)', items: [{ k: 'academic', label: 'Add', max: 5 }] },
+    { cat: 'marriage', title: 'Marriage / Divorce document (optional)', items: [{ k: 'marriage', label: 'Add', max: 2 }] },
+  ];
+  const ALL_SLOT_KEYS = SLOTS.flatMap(c => c.items.map(i => i.k));
+  function getCustomer() {
+    const c = GM_getValue('cust', null);
+    if (c && Date.now() - c.t < CUST_MS) return c;
+    if (c) clearCustomer();
+    return null;
+  }
+  function ensureCustomer() {
+    let c = getCustomer();
+    if (!c) { c = { id: [...crypto.getRandomValues(new Uint8Array(12))].map(b => b.toString(16).padStart(2, '0')).join(''), t: Date.now(), data: {} }; GM_setValue('cust', c); }
+    return c;
+  }
+  const saveCustomer = c => GM_setValue('cust', c);
+  function getDocs(k) { return getCustomer() ? GM_getValue('doc_' + k, []) : []; }
+  function setDocs(k, list) { ensureCustomer(); GM_setValue('doc_' + k, list); }
+  function clearCustomer() {
+    GM_deleteValue('cust');
+    ALL_SLOT_KEYS.forEach(k => GM_deleteValue('doc_' + k));
+    GM_deleteValue('pendingLogin'); GM_deleteValue('photos_nid'); GM_deleteValue('photos_citizenship');
+  }
+
+  // server base (same Worker as the scans)
+  const SERVER = CONFIG.scanServer.replace(/\/scan$/, '');
+  function getJSON(url) {
+    return new Promise((res, rej) => GM_xmlhttpRequest({
+      method: 'GET', url, onload: r => { let j = {}; try { j = JSON.parse(r.responseText); } catch {} r.status < 300 ? res(j) : rej(new Error(j.error || 'Server error ' + r.status)); },
+      onerror: () => rej(new Error('No internet or server unreachable')),
+    }));
+  }
+
+  let intakeEl = null, launcherEl = null;
+  const intakeOpen = () => !!(intakeEl && intakeEl.style.display !== 'none');
+  function closeIntake() { if (intakeEl) intakeEl.style.display = 'none'; }
+
+  function openIntake() {
+    if (!intakeEl) {
+      intakeEl = document.createElement('div');
+      intakeEl.className = 'k-panel';
+      intakeEl.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.45);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:24px 12px;font:15px sans-serif';
+      document.body.appendChild(intakeEl);
+      intakeEl.addEventListener('click', e => { if (e.target === intakeEl) closeIntake(); });
+    }
+    intakeEl.style.display = 'flex';
+    renderIntake();
+  }
+
+  function renderIntake(note = '') {
+    const c = getCustomer();
+    const d = (c && c.data) || {};
+    const shop = GM_getValue('shopCode', '');
+    const tile = (it) => {
+      const imgs = getDocs(it.k);
+      const thumbs = imgs.map((b, i) => `<div style="position:relative;display:inline-block;margin:4px">
+          <img src="data:image/jpeg;base64,${b}" style="width:110px;height:72px;object-fit:cover;border-radius:6px;border:1px solid #ccc">
+          <button data-del="${it.k}:${i}" title="Remove" style="position:absolute;top:-6px;right:-6px;width:22px;height:22px;border-radius:50%;border:0;background:#c8102e;color:#fff;cursor:pointer;line-height:22px;padding:0">×</button></div>`).join('');
+      const add = imgs.length < it.max ? `<label style="display:inline-flex;align-items:center;justify-content:center;width:110px;height:72px;margin:4px;border:2px dashed #c8102e;border-radius:6px;color:#c8102e;cursor:pointer;font-weight:bold;vertical-align:top">
+          ＋ ${it.label}<input data-add="${it.k}" type="file" accept="image/*" ${it.max > 1 ? 'multiple' : ''} hidden></label>` : '';
+      return `<div style="display:inline-block;vertical-align:top;margin-right:8px"><div style="font-size:12px;color:#555">${it.label === 'Add' ? '' : it.label}</div>${thumbs}${add}</div>`;
+    };
+    const result = cat => {
+      if (cat === 'nid' && d.nid) return d.nid.given ? `✔ ${d.nid.given} ${d.nid.surname} · DOB ${d.nid.dob} · NIN ${d.nid.nin}${d.nid.permanentAddress && d.nid.permanentAddress.district ? ' · ' + [d.nid.permanentAddress.municipality, d.nid.permanentAddress.ward, d.nid.permanentAddress.district].filter(Boolean).join(', ') : ''}` : '⚠ Could not read — retake the photo';
+      if (cat === 'citizenship' && d.citizenship) return d.citizenship.citizenshipNo ? `✔ No. ${d.citizenship.citizenshipNo} · born ${d.citizenship.birthDistrict || '?'} · issued ${d.citizenship.issueDistrict || '?'} ${d.citizenship.issueDateBS || ''}` : '⚠ Could not read — retake the photo';
+      if (cat === 'residence' && d.residence) return d.residence.address && d.residence.address.district ? `✔ ${[d.residence.address.tole, d.residence.address.municipality, d.residence.address.ward, d.residence.address.district].filter(Boolean).join(', ')}` : '⚠ Could not read — retake the photo';
+      return '';
+    };
+    intakeEl.innerHTML = `<div style="background:#fff;border-radius:14px;max-width:760px;width:100%;padding:18px;box-shadow:0 8px 30px rgba(0,0,0,.3)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+        <b style="color:#c8102e;font-size:18px">🗂 Customer documents / ग्राहकका कागजात</b>
+        <span><button id="k-new" style="padding:8px 12px;border:1px solid #c8102e;background:#fff;color:#c8102e;border-radius:8px;cursor:pointer">＋ New customer</button>
+        <button id="k-close" style="padding:8px 12px;border:0;background:#eee;border-radius:8px;cursor:pointer">Close ✕</button></span>
+      </div>
+      <div style="margin-top:8px;padding:8px 10px;background:#f6f7f9;border-radius:8px;font-size:13px">Shop code: <input id="k-shop" value="${shop}" placeholder="e.g. 86QMSH" style="width:110px;padding:5px;border:1px solid #ccc;border-radius:5px;text-transform:uppercase"> <button id="k-shop-save" style="padding:5px 10px;border:0;background:#333;color:#fff;border-radius:5px;cursor:pointer">Save</button> <span id="k-shop-info" style="color:#555"></span></div>
+      ${SLOTS.map(cat => `<div style="margin-top:12px;padding:10px;border:1px solid #eee;border-radius:10px">
+        <div style="font-weight:bold">${cat.title}${cat.need ? ' <span style="color:#c8102e">*</span>' : ''}</div>
+        ${cat.hint ? `<div style="font-size:12px;color:#777">${cat.hint}</div>` : ''}
+        <div style="margin-top:4px">${cat.items.map(tile).join('')}</div>
+        ${result(cat.cat) ? `<div style="margin-top:4px;font-size:13px;color:${/^✔/.test(result(cat.cat)) ? '#1a7f37' : '#b45309'}">${result(cat.cat)}</div>` : ''}
+      </div>`).join('')}
+      <div id="k-intake-note" style="margin-top:10px;font-size:14px;color:#333">${note}</div>
+      <button id="k-read" style="width:100%;margin-top:10px;padding:14px;font-size:17px;border:0;border-radius:10px;background:#1a7f37;color:#fff;cursor:pointer">📖 Read documents & continue / पढ्नुहोस्</button>
+    </div>`;
+    const $i = q => intakeEl.querySelector(q);
+    $i('#k-close').onclick = closeIntake;
+    $i('#k-new').onclick = () => { clearCustomer(); renderIntake('New customer started. Add their documents. / नयाँ ग्राहक'); };
+    $i('#k-shop-save').onclick = () => { GM_setValue('shopCode', $i('#k-shop').value.trim().toUpperCase()); showShopInfo(); };
+    showShopInfo();
+    intakeEl.querySelectorAll('input[data-add]').forEach(inp => inp.onchange = async () => {
+      const k = inp.dataset.add, it = SLOTS.flatMap(c => c.items).find(x => x.k === k);
+      const list = getDocs(k);
+      for (const f of [...inp.files].slice(0, it.max - list.length)) list.push(await toJpegBase64(f));
+      setDocs(k, list);
+      const c2 = ensureCustomer(); const cat = SLOTS.find(c => c.items.some(x => x.k === k)).cat;
+      if (c2.data[cat]) { delete c2.data[cat]; saveCustomer(c2); }          // photos changed: read again
+      renderIntake();
+    });
+    intakeEl.querySelectorAll('button[data-del]').forEach(b => b.onclick = () => {
+      const [k, i] = b.dataset.del.split(':'); const list = getDocs(k); list.splice(+i, 1); setDocs(k, list);
+      const c2 = ensureCustomer(); const cat = SLOTS.find(c => c.items.some(x => x.k === k)).cat;
+      if (c2.data[cat]) { delete c2.data[cat]; saveCustomer(c2); }
+      renderIntake();
+    });
+    $i('#k-read').onclick = readAllDocuments;
+  }
+
+  async function showShopInfo() {
+    const el = intakeEl && intakeEl.querySelector('#k-shop-info');
+    const code = GM_getValue('shopCode', '');
+    if (!el) return;
+    if (!code) { el.textContent = 'Enter the code you were given'; return; }
+    el.textContent = '…';
+    try { const j = await getJSON(SERVER + '/shop?shop=' + encodeURIComponent(code)); el.textContent = `✔ ${j.name || j.shop} · today: ${j.today} application${j.today === 1 ? '' : 's'}`; }
+    catch (e) { el.textContent = '⚠ ' + e.message; }
+  }
+
+  async function readAllDocuments() {
+    const note = t => { const n = intakeEl.querySelector('#k-intake-note'); if (n) n.innerHTML = t; };
+    const front = getDocs('nid_front'), back = getDocs('nid_back');
+    if (!front.length) { note('👉 Add at least the NID front photo. / NID को अगाडिको फोटो थप्नुहोस्'); return; }
+    const c = ensureCustomer();
+    const shop = GM_getValue('shopCode', '');
+    note('⏳ Reading documents… / कागजात पढ्दै…');
+    const jobs = [];
+    if (!c.data.nid) jobs.push(post(CONFIG.scanServer, { kind: 'nid', images: [...front, ...back], shop }).then(d => { c.data.nid = d; }));
+    const cit = [...getDocs('cit_front'), ...getDocs('cit_back')];
+    if (cit.length && !c.data.citizenship) jobs.push(post(CONFIG.scanServer, { kind: 'citizenship', images: cit, shop }).then(d => { c.data.citizenship = d; }));
+    const res = getDocs('residence');
+    if (res.length && !c.data.residence) jobs.push(post(CONFIG.scanServer, { kind: 'residence', images: res, shop }).then(d => { c.data.residence = d; }));
+    const results = await Promise.allSettled(jobs);
+    saveCustomer(c);
+    const err = results.find(r => r.status === 'rejected');
+    const missing = [];
+    if (!cit.length) missing.push('citizenship (front + back)');
+    else if (getDocs('cit_back').length === 0) missing.push('citizenship back');
+    renderIntake(err ? '❌ ' + err.reason.message : (missing.length ? '👉 Still needed later for upload: ' + missing.join(', ') : '✔ Done. Check the details above against the documents.'));
+    if (!err && c.data.nid && c.data.nid.given) {
+      say('कागजात पढियो। विवरण मिलाएर जाँच्नुहोस्।');
+      if (regApi && regBox && regBox.isConnected) { regApi.fill(c.data.nid); setTimeout(closeIntake, 1500); }
+    }
+  }
+
+  // small launcher on every page of the portal
+  function ensureLauncher() {
+    if (launcherEl && launcherEl.isConnected) return;
+    launcherEl = document.createElement('button');
+    launcherEl.className = 'k-panel';
+    launcherEl.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:99998;padding:10px 14px;border:0;border-radius:24px;background:#c8102e;color:#fff;font:bold 14px sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.25);cursor:pointer';
+    launcherEl.onclick = openIntake;
+    document.body.appendChild(launcherEl);
+  }
+  setInterval(() => {
+    ensureLauncher();
+    const c = getCustomer();
+    const name = c && c.data.nid && c.data.nid.given ? c.data.nid.given.split(' ')[0] : '';
+    launcherEl.textContent = '🗂 ' + (name ? 'Customer: ' + name : 'Customer documents');
+  }, 1000);
+
+  // ---------- COUNT: one submitted application per customer, for the shop's bill ----------
+  async function sha256Hex(t) { const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t)); return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join(''); }
+  async function sendCount(rec) {
+    const queue = GM_getValue('countQueue', []);
+    if (rec) queue.push(rec);
+    const left = [];
+    for (const r of queue) {
+      try {
+        const j = await post(SERVER + '/count', { shop: r.shop, ref: r.ref });
+        toast(`✔ Application submitted${j.counted ? '' : ' (already recorded)'} · shop ${r.shop} · today: ${j.today}`);
+      } catch (e) {
+        if (/unknown|switched off|missing/i.test(e.message)) toast('⚠ Not recorded: ' + e.message, '#ffe5e5');
+        else left.push(r);                                  // offline: try again later
+      }
+    }
+    GM_setValue('countQueue', left);
+  }
+  const signedInEmail = () => ([...document.querySelectorAll('button')].map(txt).find(t => /^\S+@\S+\.\S+$/.test(t)) || '').toLowerCase();
+  async function applySucceeded(p) {
+    GM_deleteValue('applyPending');
+    const shop = GM_getValue('shopCode', '');
+    const appNo = (txt(document.body).match(/(?:application|reference|request|tracking)\s*(?:no\.?|number|id|code)\s*[:#-]?\s*([A-Z0-9][A-Z0-9\-\/]{4,})/i) || [])[1];
+    const ref = await sha256Hex('app|' + (appNo || p.email || p.cust || String(p.t)));   // hash only: the real number never leaves the device
+    if (!shop) toast('⚠ Application submitted, but no shop code is set — it was not recorded.', '#ffe5e5');
+    else await sendCount({ shop, ref });
+    clearCustomer();                                        // done with this customer
+  }
+  document.addEventListener('click', e => {
+    if (!e.isTrusted || !location.pathname.toLowerCase().startsWith('/application/integrated-enrollment')) return;
+    const b = e.target.closest && e.target.closest('button');
+    if (!b || b.closest('.k-panel') || !/^apply$/i.test(txt(b))) return;
+    const c = getCustomer();
+    const p = { t: Date.now(), email: signedInEmail(), cust: c ? c.id : '' };
+    GM_setValue('applyPending', p);
+    watchApply(p);
+  }, true);
+  async function watchApply(p) {
+    const start = location.pathname;
+    for (let i = 0; i < 120; i++) {                         // up to 60 s
+      await sleep(500);
+      const body = txt(document.body);
+      const msgs = [...document.querySelectorAll('.p-toast-message, .p-dialog, .p-message, [role=alert]')].filter(visible).map(txt).join(' ');
+      if (/invalid captcha|wrong captcha|captcha.*(incorrect|invalid)|error/i.test(msgs)) { GM_deleteValue('applyPending'); return; }   // failed: not counted
+      if (/success|submitted|सफल/i.test(msgs) || location.pathname !== start || /application (was )?(successfully )?submitted/i.test(body)) return applySucceeded(p);
+    }
+  }
+  // the page may reload after Apply: finish the count on the next page
+  (function resumeApply() {
+    const p = GM_getValue('applyPending', null);
+    if (!p) return;
+    if (Date.now() - p.t > 10 * 60 * 1000) return GM_deleteValue('applyPending');
+    if (!location.pathname.toLowerCase().startsWith('/application/integrated-enrollment')) setTimeout(() => applySucceeded(p), 1500);
+  })();
+  setTimeout(() => sendCount(null), 3000);                  // retry any count that could not be sent earlier
 
   // ---------- AFTER SIGN-IN: go straight to "Apply for a document" ----------
   // Only right after the login page (within 2 minutes), so normal visits to Home are left alone.
