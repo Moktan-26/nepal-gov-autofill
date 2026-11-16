@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    https://github.com/Moktan-26/nepal-gov-autofill
-// @version      9.2
+// @version      9.3
 // @description  Shop kiosk for the Nepal passport portal: the customer's documents (NID, citizenship, temporary residence, optional academic and marriage/divorce) are added and read once at the start, then every step is filled from them (register, citizenship, address, phone + email), documents are uploaded on Supporting documents, Next is pressed on completed steps, and each submitted application is counted for the shop. Nepali voice prompts. Captcha, Register and Apply stay manual.
 // @match        https://online.nepalpassport.gov.np/*
 // @grant        GM_xmlhttpRequest
@@ -210,7 +210,7 @@
     const wrap = document.createElement('div');
     wrap.style.marginTop = '6px';
     wrap.innerHTML = `<div style="font-size:12px;color:#555">${f.label}</div>
-      <input id="k-${f.k}" style="width:100%;box-sizing:border-box;padding:8px;border:2px solid #ccc;border-radius:6px;font-size:16px">
+      <input id="k-${f.k}" name="k-${f.k}-${Math.random().toString(36).slice(2, 8)}" autocomplete="off" style="width:100%;box-sizing:border-box;padding:8px;border:2px solid #ccc;border-radius:6px;font-size:16px">
       <div id="k-${f.k}-err" style="font-size:12px;color:#c8102e"></div>`;
     $('#k-fields').appendChild(wrap);
   });
@@ -243,6 +243,21 @@
     return true;
   }
 
+  // Chrome's own autofill (saved name / work email / phone of whoever uses this computer) must not end up in a customer's form:
+  // put back the NID values, clear phone + email.
+  setInterval(() => {
+    if (!box.isConnected) return;
+    const nid = (getCustomer() || { data: {} }).data.nid || {};
+    FIELDS.forEach(f => {
+      const el = input(f.k);
+      let auto = false; try { auto = el.matches(':autofill') || el.matches(':-webkit-autofill'); } catch (e) {}
+      if (!auto) return;
+      el.value = ['given', 'surname', 'dob', 'nin'].includes(f.k) ? (nid[f.k] || '') : '';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      msg('⚠ Chrome filled in saved details — removed. Type the customer\'s own ' + (f.k === 'email' ? 'email' : f.k === 'phone' ? 'mobile' : 'details') + '.');
+    });
+  }, 400);
+
   // Live check as the user types
   FIELDS.forEach(f => input(f.k).addEventListener('input', () => {
     const v = val(f.k);
@@ -268,7 +283,7 @@
   $('#k-scan').onclick = () => openIntake();
   regApi = {
     fill(d) {
-      ['given', 'surname', 'dob', 'nin'].forEach(k => { if (d[k] && !val(k)) input(k).value = d[k]; });
+      ['given', 'surname', 'dob', 'nin'].forEach(k => { if (d[k]) input(k).value = d[k]; });   // the NID is the source: it replaces anything Chrome put there
       const got = ['given', 'surname', 'dob', 'nin'].filter(k => val(k)).length;
       msg(got === 4 ? '✔ Details from the NID. Check them against the card.' : `Read ${got} of 4 details from the NID.`);
       guide();
@@ -615,7 +630,7 @@
     if (citBusy || intakeOpen() || !cit || !visible(cit) || citDone.has(cit) || cit.value.trim()) return;
     const c = getCustomer(), d = c && c.data.citizenship;
     citDone.add(cit);
-    if (!d || !d.citizenshipNo) {
+    if (!d || !/\d/.test(d.citizenshipNo || '')) {
       toast('👉 Citizenship details are not read yet / नागरिकताको विवरण छैन<button id="k-open-intake" style="display:block;width:100%;margin-top:10px;padding:12px;background:#c8102e;color:#fff;border:0;border-radius:8px;cursor:pointer">🗂 Customer documents</button>', '#fff4e5');
       toastEl.querySelector('#k-open-intake').onclick = () => { citDone.delete(cit); openIntake(); };
       return;
@@ -852,7 +867,7 @@
     };
     const result = cat => {
       if (cat === 'nid' && d.nid) return d.nid.given ? `✔ ${d.nid.given} ${d.nid.surname} · DOB ${d.nid.dob} · NIN ${d.nid.nin}${d.nid.permanentAddress && d.nid.permanentAddress.district ? ' · ' + [d.nid.permanentAddress.municipality, d.nid.permanentAddress.ward, d.nid.permanentAddress.district].filter(Boolean).join(', ') : ''}` : '⚠ Could not read — retake the photo';
-      if (cat === 'citizenship' && d.citizenship) return d.citizenship.citizenshipNo ? `✔ No. ${d.citizenship.citizenshipNo} · born ${d.citizenship.birthDistrict || '?'} · issued ${d.citizenship.issueDistrict || '?'} ${d.citizenship.issueDateBS || ''}` : '⚠ Could not read — retake the photo';
+      if (cat === 'citizenship' && d.citizenship) return /\d/.test(d.citizenship.citizenshipNo || '') ? `✔ No. ${d.citizenship.citizenshipNo} · born ${d.citizenship.birthDistrict || '?'} · issued ${d.citizenship.issueDistrict || '?'} ${d.citizenship.issueDateBS || ''}` : '⚠ Could not read — retake the photo';
       if (cat === 'residence' && d.residence) return d.residence.address && d.residence.address.district ? `✔ ${[d.residence.address.tole, d.residence.address.municipality, d.residence.address.ward, d.residence.address.district].filter(Boolean).join(', ')}` : '⚠ Could not read — retake the photo';
       return '';
     };
