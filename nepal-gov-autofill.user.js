@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    https://github.com/Moktan-26/nepal-gov-autofill
-// @version      9.3
+// @version      9.4
 // @description  Shop kiosk for the Nepal passport portal: the customer's documents (NID, citizenship, temporary residence, optional academic and marriage/divorce) are added and read once at the start, then every step is filled from them (register, citizenship, address, phone + email), documents are uploaded on Supporting documents, Next is pressed on completed steps, and each submitted application is counted for the shop. Nepali voice prompts. Captcha, Register and Apply stay manual.
 // @match        https://online.nepalpassport.gov.np/*
 // @grant        GM_xmlhttpRequest
@@ -696,8 +696,12 @@
   async function selectTarget(re) {
     const li = [...document.querySelectorAll('li.p-listbox-item')].find(l => re.test(txt(l)));
     if (!li) return false;
-    li.click();
-    for (let i = 0; i < 20; i++) { await sleep(250); const st = scanStatus(); if (st && re.test(st.target)) return true; }
+    const now = scanStatus(); if (now && re.test(now.target)) return true;      // already selected: clicking again would deselect it
+    for (let attempt = 0; attempt < 2; attempt++) {
+      li.click();
+      for (let i = 0; i < 12; i++) { await sleep(250); const st = scanStatus(); if (st && re.test(st.target)) return true; }
+      if (scanStatus()) return false;                                          // another target is showing
+    }
     return false;
   }
   // put the photos into the upload box for one document type; returns how many were attached
@@ -728,9 +732,11 @@
     { re: /marriage|divorce/i, name: 'Marriage/Divorce document', slots: ['marriage'] },
   ];
   async function onDocsStep() {
-    const input = siteFileInput();
-    if (docsBusy || intakeOpen() || !input || docsSeen.has(input) || !scanStatus()) return;
-    docsSeen.add(input); docsBusy = true;
+    // once per visit of the Supporting documents step (the site re-creates its upload box on every click)
+    const first = [...document.querySelectorAll('li.p-listbox-item')].find(l => /citizenship|national eid/i.test(txt(l)));
+    const list = first && (first.closest('.p-listbox') || first.parentElement);
+    if (docsBusy || intakeOpen() || !list || docsSeen.has(list)) return;
+    docsSeen.add(list); docsBusy = true;
     toast('⏳ Adding the customer\'s documents… / कागजात थप्दै…');
     const lines = [];
     let missingRequired = false;
@@ -747,7 +753,7 @@
     await selectTarget(/citizenship/i);
     toast(lines.join('<br>') + (missingRequired ? '<button id="k-open-intake" style="display:block;width:100%;margin-top:10px;padding:12px;background:#c8102e;color:#fff;border:0;border-radius:8px;cursor:pointer">🗂 Customer documents</button>' : ''), missingRequired ? '#fff4e5' : '#e6f4ea');
     const b = toastEl && toastEl.querySelector('#k-open-intake');
-    if (b) b.onclick = () => { docsSeen.delete(input); openIntake(); };
+    if (b) b.onclick = () => { docsSeen.delete(list); openIntake(); };
     say(missingRequired ? 'बाँकी कागजातको फोटो थप्नुहोस्।' : 'कागजातहरू अपलोड भए।');
     docsBusy = false;
   }
