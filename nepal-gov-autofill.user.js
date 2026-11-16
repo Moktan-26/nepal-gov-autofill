@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    https://github.com/Moktan-26/nepal-gov-autofill
-// @version      9.1
+// @version      9.2
 // @description  Shop kiosk for the Nepal passport portal: the customer's documents (NID, citizenship, temporary residence, optional academic and marriage/divorce) are added and read once at the start, then every step is filled from them (register, citizenship, address, phone + email), documents are uploaded on Supporting documents, Next is pressed on completed steps, and each submitted application is counted for the shop. Nepali voice prompts. Captcha, Register and Apply stay manual.
 // @match        https://online.nepalpassport.gov.np/*
 // @grant        GM_xmlhttpRequest
@@ -11,6 +11,7 @@
 // @connect      nepal-gov-autofill.tamang-subash36.workers.dev
 // @updateURL    https://raw.githubusercontent.com/Moktan-26/nepal-gov-autofill/main/nepal-gov-autofill.user.js
 // @downloadURL  https://raw.githubusercontent.com/Moktan-26/nepal-gov-autofill/main/nepal-gov-autofill.user.js
+// @require      https://cdn.jsdelivr.net/npm/heic-to@1.6.6/dist/iife/heic-to.js
 // @require      https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js
 // @run-at       document-idle
 // ==/UserScript==
@@ -79,20 +80,27 @@
   }
 
   // Shrink photo to max 1600px JPEG (faster upload, still sharp enough)
-  // iPhone photos (HEIC) are converted first: Chrome cannot open them by itself
-  const isHeic = f => /hei[cf]/i.test(f.type) || /\.hei[cf]$/i.test(f.name || '');
+  // iPhone photos (HEIC) are converted first: Chrome cannot open them by itself.
+  // Tries the browser, then the newer HEIC decoder (heic-to), then the older one (heic2any).
+  async function openImage(blob) {
+    const img = new Image();
+    img.src = URL.createObjectURL(blob);
+    try { await img.decode(); return img; } catch (e) { URL.revokeObjectURL(img.src); return null; }
+  }
   async function toJpegBase64(file) {
     if (/pdf/i.test(file.type) || /\.pdf$/i.test(file.name || '')) throw new Error('PDF files can\'t be used — take a photo (JPG/PNG) of the document instead');
-    let src = file;
-    if (isHeic(file)) {
-      if (typeof heic2any !== 'function') throw new Error('iPhone photo (HEIC) converter not loaded — refresh the page');
-      src = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.9 });
-      if (Array.isArray(src)) src = src[0];
+    let img = await openImage(file);
+    const tried = [];
+    if (!img && typeof HeicTo === 'function') {
+      try { img = await openImage(await HeicTo({ blob: file, type: 'image/jpeg', quality: 0.9 })); } catch (e) { tried.push('heic-to: ' + (e && e.message || e)); }
     }
-    const img = new Image();
-    img.src = URL.createObjectURL(src);
-    try { await img.decode(); }
-    catch (e) { URL.revokeObjectURL(img.src); throw new Error('Can\'t open "' + (file.name || 'photo') + '" — use a JPG or PNG photo'); }
+    if (!img && typeof heic2any === 'function') {
+      try { let j = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.9 }); if (Array.isArray(j)) j = j[0]; img = await openImage(j); } catch (e) { tried.push('heic2any: ' + (e && e.message || e)); }
+    }
+    if (!img) {
+      if (tried.length) console.warn('[Nepal Gov Autofill] could not convert', file.name, file.type, file.size, tried);
+      throw new Error('Can\'t open "' + (file.name || 'photo') + '" (' + (file.type || 'unknown type') + ') — use a JPG or PNG photo');
+    }
     const k = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
     const c = document.createElement('canvas');
     c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
