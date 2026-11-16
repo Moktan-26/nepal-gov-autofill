@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nepal Gov Autofill – Passport Register
 // @namespace    https://github.com/Moktan-26/nepal-gov-autofill
-// @version      9.0
+// @version      9.1
 // @description  Shop kiosk for the Nepal passport portal: the customer's documents (NID, citizenship, temporary residence, optional academic and marriage/divorce) are added and read once at the start, then every step is filled from them (register, citizenship, address, phone + email), documents are uploaded on Supporting documents, Next is pressed on completed steps, and each submitted application is counted for the shop. Nepali voice prompts. Captcha, Register and Apply stay manual.
 // @match        https://online.nepalpassport.gov.np/*
 // @grant        GM_xmlhttpRequest
@@ -11,6 +11,7 @@
 // @connect      nepal-gov-autofill.tamang-subash36.workers.dev
 // @updateURL    https://raw.githubusercontent.com/Moktan-26/nepal-gov-autofill/main/nepal-gov-autofill.user.js
 // @downloadURL  https://raw.githubusercontent.com/Moktan-26/nepal-gov-autofill/main/nepal-gov-autofill.user.js
+// @require      https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -78,10 +79,20 @@
   }
 
   // Shrink photo to max 1600px JPEG (faster upload, still sharp enough)
+  // iPhone photos (HEIC) are converted first: Chrome cannot open them by itself
+  const isHeic = f => /hei[cf]/i.test(f.type) || /\.hei[cf]$/i.test(f.name || '');
   async function toJpegBase64(file) {
+    if (/pdf/i.test(file.type) || /\.pdf$/i.test(file.name || '')) throw new Error('PDF files can\'t be used — take a photo (JPG/PNG) of the document instead');
+    let src = file;
+    if (isHeic(file)) {
+      if (typeof heic2any !== 'function') throw new Error('iPhone photo (HEIC) converter not loaded — refresh the page');
+      src = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.9 });
+      if (Array.isArray(src)) src = src[0];
+    }
     const img = new Image();
-    img.src = URL.createObjectURL(file);
-    await img.decode();
+    img.src = URL.createObjectURL(src);
+    try { await img.decode(); }
+    catch (e) { URL.revokeObjectURL(img.src); throw new Error('Can\'t open "' + (file.name || 'photo') + '" — use a JPG or PNG photo'); }
     const k = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
     const c = document.createElement('canvas');
     c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
@@ -860,12 +871,14 @@
     showShopInfo();
     intakeEl.querySelectorAll('input[data-add]').forEach(inp => inp.onchange = async () => {
       const k = inp.dataset.add, it = SLOTS.flatMap(c => c.items).find(x => x.k === k);
-      const list = getDocs(k);
-      for (const f of [...inp.files].slice(0, it.max - list.length)) list.push(await toJpegBase64(f));
+      const list = getDocs(k), errs = [];
+      for (const f of [...inp.files].slice(0, it.max - list.length)) {
+        try { list.push(await toJpegBase64(f)); } catch (e) { errs.push(e.message); }
+      }
       setDocs(k, list);
       const c2 = ensureCustomer(); const cat = SLOTS.find(c => c.items.some(x => x.k === k)).cat;
       if (c2.data[cat]) { delete c2.data[cat]; saveCustomer(c2); }          // photos changed: read again
-      renderIntake();
+      renderIntake(errs.length ? '❌ ' + errs.join('<br>❌ ') : '');
     });
     intakeEl.querySelectorAll('button[data-del]').forEach(b => b.onclick = () => {
       const [k, i] = b.dataset.del.split(':'); const list = getDocs(k); list.splice(+i, 1); setDocs(k, list);
